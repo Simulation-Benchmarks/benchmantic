@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+workflow.py
+
+Runs the full local dev loop in one command:
+
+    build_benchmark  -->  show_benchmark  -->  check_benchmark
+
+1. build_benchmark generates benchmark.jsonld + the Snakefile zip into
+   outputs/<software-name>/.
+2. show_benchmark renders benchmark.jsonld as Markdown tables, so you can
+   eyeball what got extracted.
+3. check_benchmark validates it against what semantic_benchmark actually
+   needs (see that script for details), and this script's own exit code
+   mirrors its result -- so `workflow.py ... && echo ok` behaves the way
+   you'd expect in CI.
+
+All of build_benchmark's own options (module_dir, --scenario-params,
+--container-image, --mesh-split, etc.) are accepted here too and passed
+straight through -- run `python3 build_benchmark.py --help` for the full
+list, since this script doesn't duplicate that help text. Two extra
+options control the later steps:
+
+    --semantic-benchmark-src PATH   passed through to check_benchmark
+    --show-output PATH              passed through to show_benchmark
+                                     (saves the tables to a file instead of
+                                     printing them)
+    --skip-show / --skip-check      skip either later step
+
+Usage
+-----
+    python3 workflow.py <module_dir> \\
+        --scenario-params Cells0,Cells1,Grading0,Radial0,Name,Omega1,Omega2 \\
+        --full-value-params Radial0 \\
+        --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
+        --container-shared-dir /dumux/shared \\
+        --mesh-split --zip-name-flag Problem.Name \\
+        --semantic-benchmark-src ../semantic-benchmark
+
+Note: -h/--help here shows build_benchmark's help (since its parser
+consumes whatever it recognizes first) -- run the three scripts' own
+--help separately for their full option lists.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+import build_benchmark  # noqa: E402
+import check_benchmark  # noqa: E402
+import show_benchmark  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = list(argv if argv is not None else sys.argv[1:])
+
+    # Pull out workflow-only flags first; everything else goes to
+    # build_benchmark's own parser untouched.
+    extra_ap = argparse.ArgumentParser(add_help=False)
+    extra_ap.add_argument("--semantic-benchmark-src", type=Path, default=None)
+    extra_ap.add_argument("--show-output", type=Path, default=None)
+    extra_ap.add_argument("--skip-show", action="store_true")
+    extra_ap.add_argument("--skip-check", action="store_true")
+    extra_args, remaining = extra_ap.parse_known_args(argv)
+
+    print("=== build_benchmark ===")
+    build_args = build_benchmark.build_arg_parser().parse_args(remaining)
+    benchmark_path, zip_path = build_benchmark.run(build_args)
+
+    if not extra_args.skip_show:
+        print("\n=== show_benchmark ===")
+        show_argv = [str(benchmark_path)]
+        if extra_args.show_output:
+            show_argv += ["--output", str(extra_args.show_output)]
+        show_benchmark.run(show_benchmark.build_arg_parser().parse_args(show_argv))
+
+    exit_code = 0
+    if not extra_args.skip_check:
+        print("\n=== check_benchmark ===")
+        check_argv = [str(benchmark_path)]
+        if extra_args.semantic_benchmark_src:
+            check_argv += ["--semantic-benchmark-src", str(extra_args.semantic_benchmark_src)]
+        exit_code = check_benchmark.run(check_benchmark.build_arg_parser().parse_args(check_argv))
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
