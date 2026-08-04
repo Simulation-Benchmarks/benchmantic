@@ -1,9 +1,9 @@
 # Generated build artifacts (benchmark.jsonld + Snakefile zip from
-# build_benchmark.py) -- these are outputs of the pipeline, not source.
+# describe_benchmark.py) -- these are outputs of the pipeline, not source.
 outputs/
 
 # If a semantic-benchmark checkout is cloned alongside this repo for
-# check_benchmark.py's --semantic-benchmark-src auto-detection (see its
+# verify_description.py's --semantic-benchmark-src auto-detection (see its
 # --help), it's an external dependency, not part of this project.
 /semantic-benchmark/
 

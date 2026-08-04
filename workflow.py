@@ -4,25 +4,25 @@ workflow.py
 
 Runs the full local dev loop in one command:
 
-    build_benchmark  -->  show_benchmark  -->  check_benchmark
+    describe_benchmark  -->  show_description  -->  verify_description
 
-1. build_benchmark generates benchmark.jsonld + the Snakefile zip into
+1. describe_benchmark generates benchmark.jsonld + the Snakefile zip into
    outputs/<software-name>/.
-2. show_benchmark renders benchmark.jsonld as Markdown tables, so you can
+2. show_description renders benchmark.jsonld as Markdown tables, so you can
    eyeball what got extracted.
-3. check_benchmark validates it against what semantic_benchmark actually
+3. verify_description validates it against what semantic_benchmark actually
    needs (see that script for details), and this script's own exit code
    mirrors its result -- so `workflow.py ... && echo ok` behaves the way
    you'd expect in CI.
 
-All of build_benchmark's own options (module_dir, --scenario-params,
+All of describe_benchmark's own options (module_dir, --scenario-params,
 --container-image, --mesh-split, etc.) are accepted here too and passed
-straight through -- run `python3 build_benchmark.py --help` for the full
+straight through -- run `python3 describe_benchmark.py --help` for the full
 list, since this script doesn't duplicate that help text. Two extra
 options control the later steps:
 
-    --semantic-benchmark-src PATH   passed through to check_benchmark
-    --show-output PATH              passed through to show_benchmark
+    --semantic-benchmark-src PATH   passed through to verify_description
+    --show-output PATH              passed through to show_description
                                      (saves the tables to a file instead of
                                      printing them)
     --skip-show / --skip-check      skip either later step
@@ -37,7 +37,7 @@ Usage
         --mesh-split --zip-name-flag Problem.Name \\
         --semantic-benchmark-src ../semantic-benchmark
 
-Note: -h/--help here shows build_benchmark's help (since its parser
+Note: -h/--help here shows describe_benchmark's help (since its parser
 consumes whatever it recognizes first) -- run the three scripts' own
 --help separately for their full option lists.
 """
@@ -51,16 +51,16 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import build_benchmark  # noqa: E402
-import check_benchmark  # noqa: E402
-import show_benchmark  # noqa: E402
+import describe_benchmark  # noqa: E402
+import verify_description  # noqa: E402
+import show_description  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(argv if argv is not None else sys.argv[1:])
 
     # Pull out workflow-only flags first; everything else goes to
-    # build_benchmark's own parser untouched.
+    # describe_benchmark's own parser untouched.
     extra_ap = argparse.ArgumentParser(add_help=False)
     extra_ap.add_argument("--semantic-benchmark-src", type=Path, default=None)
     extra_ap.add_argument("--show-output", type=Path, default=None)
@@ -68,24 +68,24 @@ def main(argv: list[str] | None = None) -> None:
     extra_ap.add_argument("--skip-check", action="store_true")
     extra_args, remaining = extra_ap.parse_known_args(argv)
 
-    print("=== build_benchmark ===")
-    build_args = build_benchmark.build_arg_parser().parse_args(remaining)
-    benchmark_path, zip_path = build_benchmark.run(build_args)
+    print("=== describe_benchmark ===")
+    build_args = describe_benchmark.build_arg_parser().parse_args(remaining)
+    benchmark_path, zip_path = describe_benchmark.run(build_args)
 
     if not extra_args.skip_show:
-        print("\n=== show_benchmark ===")
+        print("\n=== show_description ===")
         show_argv = [str(benchmark_path)]
         if extra_args.show_output:
             show_argv += ["--output", str(extra_args.show_output)]
-        show_benchmark.run(show_benchmark.build_arg_parser().parse_args(show_argv))
+        show_description.run(show_description.build_arg_parser().parse_args(show_argv))
 
     exit_code = 0
     if not extra_args.skip_check:
-        print("\n=== check_benchmark ===")
+        print("\n=== verify_description ===")
         check_argv = [str(benchmark_path)]
         if extra_args.semantic_benchmark_src:
             check_argv += ["--semantic-benchmark-src", str(extra_args.semantic_benchmark_src)]
-        exit_code = check_benchmark.run(check_benchmark.build_arg_parser().parse_args(check_argv))
+        exit_code = verify_description.run(verify_description.build_arg_parser().parse_args(check_argv))
 
     sys.exit(exit_code)
 

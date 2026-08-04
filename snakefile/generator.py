@@ -3,7 +3,7 @@ snakefile.generator
 
 Derives everything the generated Snakefile needs from a benchmark.jsonld
 (case-varying parameters, executable/build-dir, software name) and
-provides the CLI (build_arg_parser/generate) that build_benchmark.py calls
+provides the CLI (build_arg_parser/generate) that describe_benchmark.py calls
 directly.
 """
 

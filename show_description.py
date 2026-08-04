@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-show_benchmark.py
+show_description.py
 
 Renders a metadata.builder-produced benchmark.jsonld RO-Crate graph as
 human-readable Markdown tables for manual verification: benchmark/manifest
@@ -8,8 +8,8 @@ info, pinned dependency versions, input parameters, and output metrics.
 
 Usage
 -----
-    python3 show_benchmark.py benchmark.jsonld
-    python3 show_benchmark.py benchmark.jsonld --output review.md
+    python3 show_description.py benchmark.jsonld
+    python3 show_description.py benchmark.jsonld --output review.md
 
 With no --output, the tables are printed to stdout.
 """
@@ -202,7 +202,7 @@ def build_metrics_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> N
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("metadata_jsonld", type=Path, help="Path to a build_benchmark.py output (benchmark.jsonld).")
+    ap.add_argument("metadata_jsonld", type=Path, help="Path to a describe_benchmark.py output (benchmark.jsonld).")
     ap.add_argument("--output", type=Path, default=None,
                      help="Write the Markdown tables to this file instead of printing to stdout.")
     return ap

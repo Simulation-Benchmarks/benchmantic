@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check_benchmark.py
+verify_description.py
 
 Checks a metadata.builder-produced benchmark.jsonld against what
 semantic_benchmark.BenchmarkLoader and rocrate/create.py actually need to
@@ -21,7 +21,7 @@ enough:
 
     git clone https://github.com/Simulation-Benchmarks/semantic-benchmark.git
     pip install rdflib   # only real dependency BenchmarkLoader needs
-    python3 check_benchmark.py benchmark.jsonld
+    python3 verify_description.py benchmark.jsonld
 
 This script auto-detects a sibling/child ./semantic-benchmark checkout (or
 pass --semantic-benchmark-src explicitly, or set the
@@ -31,8 +31,8 @@ normal `import semantic_benchmark` if it's pip-installed instead.
 
 Usage
 -----
-    python3 check_benchmark.py benchmark.jsonld
-    python3 check_benchmark.py benchmark.jsonld --semantic-benchmark-src /path/to/semantic-benchmark
+    python3 verify_description.py benchmark.jsonld
+    python3 verify_description.py benchmark.jsonld --semantic-benchmark-src /path/to/semantic-benchmark
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ Orchestrates generation of the benchmark's RO-Crate JSON-LD ("benchmark.jsonld")
 the JSON-LD @context, the manifest (license/software/publisher/author
 derivation), GraphBuilder (assembles the actual @graph), RO-Crate 1.1
 conformance validation, and the CLI (parse_args/build) that ties it all
-together. This is the module build_benchmark.py calls directly.
+together. This is the module describe_benchmark.py calls directly.
 """
 
 from __future__ import annotations

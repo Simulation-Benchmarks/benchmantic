@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_benchmark.py
+describe_benchmark.py
 
 The only entry point for this package. Generates the semantic benchmark
 description and Snakefile from a benchmark module, calling metadata.builder
@@ -44,7 +44,7 @@ always see it live.
 
 Usage
 -----
-    python3 build_benchmark.py <module_dir> \\
+    python3 describe_benchmark.py <module_dir> \\
         --scenario-params Cells0,Cells1,Grading0,Radial0,Name,Omega1,Omega2 \\
         --full-value-params Radial0 \\
         --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
@@ -166,11 +166,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> tuple[Path, Path]:
     """Run the full build (semantic description + Snakefile). Returns
     (benchmark_path, zip_path) so callers (e.g. workflow.py) can chain into
-    show_benchmark.py/check_benchmark.py without re-deriving the output
+    show_description.py/verify_description.py without re-deriving the output
     location themselves.
     """
 
-    staging_dir = Path(tempfile.mkdtemp(prefix="build_benchmark_"))
+    staging_dir = Path(tempfile.mkdtemp(prefix="describe_benchmark_"))
     staged_benchmark = staging_dir / args.benchmark_filename
 
     # 1. Semantic description -- generated to a staging location first,
