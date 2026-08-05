@@ -10,8 +10,14 @@ Usage
 -----
     python3 show_description.py benchmark.jsonld
     python3 show_description.py benchmark.jsonld --output review.md
+    python3 show_description.py benchmark.jsonld --no-save
 
-With no --output, the tables are printed to stdout.
+Always prints to stdout. Also always saves a copy as review.md right next
+to the input file by default -- e.g. outputs/dumux/benchmark.jsonld ->
+outputs/dumux/review.md -- so the rendered table lives alongside
+benchmark.jsonld and the Snakefile zip, not just in your terminal history.
+Override the saved filename/location with --output, or skip saving
+entirely with --no-save.
 """
 
 from __future__ import annotations
@@ -204,7 +210,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("metadata_jsonld", type=Path, help="Path to a describe_benchmark.py output (benchmark.jsonld).")
     ap.add_argument("--output", type=Path, default=None,
-                     help="Write the Markdown tables to this file instead of printing to stdout.")
+                     help="Save the Markdown tables to this file instead of the default "
+                          "<input directory>/review.md (e.g. outputs/dumux/benchmark.jsonld -> "
+                          "outputs/dumux/review.md).")
+    ap.add_argument("--no-save", action="store_true",
+                     help="Only print to stdout -- don't save a review.md (or --output) file at all.")
     return ap
 
 
@@ -221,11 +231,15 @@ def run(args: argparse.Namespace) -> None:
     build_metrics_section(by_id, out)
 
     text = "\n".join(out)
-    if args.output:
-        args.output.write_text(text, encoding="utf-8")
-        print(f"Wrote {args.output}")
-    else:
-        print(text)
+    print(text)
+
+    if not args.no_save:
+        # Default: save right next to the input (e.g. outputs/dumux/benchmark.jsonld
+        # -> outputs/dumux/review.md), so the table lives alongside benchmark.jsonld
+        # and the Snakefile zip -- not just in stdout/terminal scrollback.
+        save_path = args.output or (args.metadata_jsonld.parent / "review.md")
+        save_path.write_text(text, encoding="utf-8")
+        print(f"\nSaved {save_path}")
 
 
 def main(argv: list[str] | None = None) -> None:

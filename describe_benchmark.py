@@ -40,7 +40,9 @@ moves both artifacts into outputs/<software-name>/ together.
 
 By default, output is quiet -- one short line per step, with the full
 underlying output only shown if something fails. Pass --verbose (-v) to
-always see it live.
+always see it live. Exception: if --scenario-params isn't given, the
+interactive parameter-selection prompt always runs live (it needs a real
+terminal for input()), regardless of --verbose.
 
 Usage
 -----
@@ -191,7 +193,16 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",
     )
-    run_step("Generating semantic description", args.verbose, builder.build, builder_args)
+    # The interactive parameter-selection prompt (metadata.parameters) only
+    # runs when --scenario-params wasn't supplied -- and it needs a real
+    # terminal (it calls input()), so it can't be silently captured into
+    # the quiet-mode buffer the way the rest of this step's output can.
+    # Force live output for just this step in that case, regardless of
+    # --verbose, so the prompt (and what you type) actually show up.
+    needs_interactive = args.scenario_params is None
+    if needs_interactive and not args.verbose:
+        print("   (no --scenario-params given -- showing the interactive parameter selection live)")
+    run_step("Generating semantic description", args.verbose or needs_interactive, builder.build, builder_args)
 
     software_name = args.software_name or generator.derive_software_name(load_graph(staged_benchmark))
     output_dir = Path("outputs") / software_name
