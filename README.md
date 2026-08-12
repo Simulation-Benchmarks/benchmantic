@@ -5,25 +5,34 @@ Generates a shareable, machine-readable semantic description (RO-Crate JSON-LD) 
 ## Pipeline diagram
 
 ```
-                        ┌─────────────────────┐
- source code folder ──▶ │ describe_benchmark.py│──▶ benchmark.jsonld  (RO-Crate / semantic description)
- (params, C++, README,  │  discover → infer →  │──▶ Snakefile          (packaged, container-ready)
-  build config)         │  build → validate     │
-                        └─────────────────────┘
-                                   │
-                    ┌──────────────┴──────────────┐
-                    ▼                              ▼
-           show_description.py             verify_description.py
-         (Markdown review tables)      (validates against semantic_benchmark)
+source code folder
+  (params.input, C++ source, README, build config)
+        │
+        ▼
+describe_benchmark.py
+  discover → infer → review → build → validate
+        │
+        ├─▶ benchmark.jsonld
+        │     RO-Crate / semantic description
+        └─▶ Snakefile
+              packaged, container-ready
 
-              workflow.py runs all of the above in one command
+        │
+        ├─▶ show_description.py
+        │     renders benchmark.jsonld as Markdown tables
+        └─▶ verify_description.py
+              validates against semantic_benchmark
+
+workflow.py runs all of the above in one command
 ```
 
 ## Features
 
 - Discovers input parameters and output metrics directly from source (`params.input`, `main.cc`, `problem.hh`), plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`.
 - Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in `getParam<Type>()` call-site hints from the C++ source, not just the raw config key name.
-- Caches inferred metadata on disk so repeated runs don't re-query the API, and prunes stale cache entries automatically.
+- Interactive review step: before anything is built into the graph, every inferred parameter/metric is shown in an editable table. Rows below a confidence threshold (default 0.7) are flagged and block a plain confirm until they're fixed or explicitly accepted.
+- Cross-benchmark corrections memory: whenever a reviewer edits an AI-inferred value, that correction is remembered and offered back to the LLM as guidance the next time a similarly named/typed parameter shows up, even in a different benchmark module.
+- Caches inferred (and reviewed) metadata on disk so repeated runs don't re-query the API, and prunes stale cache entries automatically.
 - Assembles a [metadata4ing](https://w3id.org/nfdi4ing/metadata4ing)/RO-Crate 1.1-conformant `@graph` describing the benchmark, its parameter sets, metrics, license, software, and authors.
 - Generates a packaged `Snakefile` from that graph, including optional radial-mesh-splitting support for rotating-cylinder-style benchmarks.
 - Renders the generated description as human-readable Markdown tables for manual review, with confidence scores and unit/quantityKind mix-ups flagged.
@@ -77,53 +86,58 @@ python3 workflow.py <module_dir> \
     --mesh-split --zip-name-flag Problem.Name
 ```
 
-`<module_dir>` can be the exact benchmark folder or a repository checkout containing one. This writes `benchmark.jsonld` and a packaged `Snakefile` to `outputs/<software-name>/`, renders a Markdown review table, and validates the result — exiting non-zero if verification fails. Skip individual steps with `--skip-show` / `--skip-check`. Run any script with `--help` for its full option list.
+`<module_dir>` can be the exact benchmark folder or a repository checkout containing one. This walks you through reviewing the AI-inferred parameter/metric metadata, then writes `benchmark.jsonld` and a packaged `Snakefile` to `outputs/<software-name>/`, renders a Markdown review table, and validates the result — exiting non-zero if verification fails.
+
+For non-interactive/CI runs, add `--skip-review` (and make sure `--scenario-params` is always passed, since omitting it also triggers an interactive prompt). Skip individual pipeline steps with `--skip-show` / `--skip-check`. Tune how strict the review gate is with `--review-confidence-threshold` (default `0.7`). Run any script with `--help` for its full option list.
 
 ## Architecture / Pipeline walkthrough
 
-`describe_benchmark.py` is the single entry point, and runs four stages in process (calling `metadata.builder` and `snakefile.generator` directly, not via subprocess):
+`describe_benchmark.py` is the single entry point, and runs five stages in process (calling `metadata.builder` and `snakefile.generator` directly, not via subprocess):
 
 1. **Discover** (`metadata.repository`, `metadata.parameters`, `metadata.metrics`) — scans the module for parameter and metric candidates, and scrapes license, dependency, build, citation, and author information from source and README. Parameters can be selected via `--scenario-params`, or interactively if omitted.
 2. **Infer** (`ai.cache`, `ai.inference`) — for every candidate not already cached, asks an LLM to infer its physical meaning. This is broken down further inside the `ai/` package:
-   - `ai.prompts` builds the prompt, assembling the benchmark's description, the candidate parameters/metrics, and the relevant source code as context.
+   - `ai.prompts` builds the prompt, assembling the benchmark's description, the candidate parameters/metrics, the relevant source code, and any relevant prior human corrections (see `ai.corrections` below) as context.
    - `ai.inference` queries the configured provider (Groq by default, or OpenAI), retrying up to 3 times on failure.
    - `ai.validation` checks the response for missing fields, out-of-range indices, and unit/quantityKind mix-ups, correcting or flagging them.
-   - `ai.cache` persists the result beside the module, so each item is inferred only once.
-3. **Build** (`metadata.builder`) — wraps each inferred value, along with the scraped manifest info, into typed nodes inside one metadata4ing `@graph` (`GraphBuilder`).
-4. **Validate & Generate** (`metadata.builder`, `snakefile.generator`, `snakefile.renderer`) — checks the graph against the RO-Crate 1.1 profile, then writes `benchmark.jsonld` and a packaged `Snakefile`.
+   - `ai.cache` persists the final (post-review) result beside the module, so each item is inferred only once.
+3. **Review** (`review.py`) — prints every parameter/metric in an editable table (semantic name, datatype, unit, quantity kind, confidence). Type a row number to edit any field, or Enter to finish; rows below the confidence threshold are flagged and require either a fix or an explicit `accept` before you can continue. Skipped entirely with `--skip-review`. Every value actually changed here is recorded by `ai.corrections`, which persists it (matched by exact or fuzzy key similarity) so a similarly named/typed parameter in a *different* benchmark benefits from it too, next time it's inferred.
+4. **Build** (`metadata.builder`) — wraps each reviewed value, along with the scraped manifest info, into typed nodes inside one metadata4ing `@graph` (`GraphBuilder`).
+5. **Validate & Generate** (`metadata.builder`, `snakefile.generator`, `snakefile.renderer`) — checks the graph against the RO-Crate 1.1 profile, then writes `benchmark.jsonld` and a packaged `Snakefile`.
 
 Two additional scripts sit downstream of generation:
 
-- **`show_description.py`** loads `benchmark.jsonld` and renders it as Markdown tables (manifest info, dependencies, parameters, metrics) for human review, flagging any unit/quantityKind mix-ups.
+- **`show_description.py`** loads `benchmark.jsonld` and renders it as Markdown tables (manifest info, dependencies, parameters, metrics) for human review, flagging any unit/quantityKind mix-ups. Unlike the interactive review step, this reflects the fully built graph — including manifest fields (license, authors, dependencies) and resolved case values that review never touches — and is saved to disk (`review.md`) as a durable record.
 - **`verify_description.py`** loads `benchmark.jsonld` with the real `semantic_benchmark.BenchmarkLoader` and checks that every processing step, parameter set, and metric field mapping actually resolves — not just that the file is valid JSON-LD.
 
-To correct a wrong inferred value: run `show_description.py` to spot the issue, edit the relevant entry in `.parameter_metadata_cache.json` (or `.metric_metadata_cache.json`) inside the module directory, then re-run `describe_benchmark.py` **without** `--clear-cache` so the fix is reused rather than re-inferred, and re-run `verify_description.py` to confirm.
+To fix a value after the fact (e.g. a run done with `--skip-review`, or something spotted later in `review.md`): edit the relevant entry in `.parameter_metadata_cache.json` (or `.metric_metadata_cache.json`) inside the module directory, then re-run `describe_benchmark.py` **without** `--clear-cache` so the fix is reused rather than re-inferred, and re-run `verify_description.py` to confirm.
 
 ## Repository structure
 
 ```
 benchmantic/
 ├── describe_benchmark.py    # entry point: orchestrates metadata + Snakefile generation
-├── show_description.py      # renders benchmark.jsonld as Markdown for review
-├── verify_description.py    # validates benchmark.jsonld against semantic_benchmark
-├── workflow.py               # runs the three scripts above as one CI-friendly pipeline
-├── utils.py                  # shared string/number/file helpers
-├── metadata/                 # benchmark.jsonld generation
-│   ├── builder.py            #   orchestrates manifest + RO-Crate @graph construction
-│   ├── graph.py              #   shared @id-resolution / node-lookup helpers
-│   ├── repository.py         #   repo scanning: README/AUTHORS/SPDX/CMake discovery
-│   ├── parameters.py         #   parameter discovery + case resolution
-│   ├── metrics.py            #   output/solution metric discovery
-│   ├── publication.py        #   literature citation extraction
-│   └── software.py           #   simulation-software detection (DuMux, OpenFOAM, ...)
-├── ai/                       # LLM-based semantic metadata inference
-│   ├── prompts.py            #   prompt templates for parameters and metrics
-│   ├── inference.py          #   provider config + request/retry loop
-│   ├── validation.py         #   response validation and repair
-│   └── cache.py              #   on-disk inference caching
-└── snakefile/                # executable-workflow generation
-    ├── generator.py          #   derives Snakefile inputs from benchmark.jsonld
-    └── renderer.py            #   renders the actual Snakefile text
+├── review.py                 # interactive CLI review/edit step with confidence gating
+├── show_description.py       # renders benchmark.jsonld as Markdown for review
+├── verify_description.py     # validates benchmark.jsonld against semantic_benchmark
+├── workflow.py                # runs the three scripts above as one CI-friendly pipeline
+├── utils.py                   # shared string/number/file helpers
+├── metadata/                  # benchmark.jsonld generation
+│   ├── builder.py             #   orchestrates manifest + RO-Crate @graph construction
+│   ├── graph.py               #   shared @id-resolution / node-lookup helpers
+│   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CMake discovery
+│   ├── parameters.py          #   parameter discovery + case resolution
+│   ├── metrics.py             #   output/solution metric discovery
+│   ├── publication.py         #   literature citation extraction
+│   └── software.py            #   simulation-software detection (DuMux, OpenFOAM, ...)
+├── ai/                        # LLM-based semantic metadata inference
+│   ├── prompts.py              #   prompt templates for parameters and metrics
+│   ├── inference.py            #   provider config + request/retry loop
+│   ├── validation.py           #   response validation and repair
+│   ├── cache.py                 #   on-disk inference caching (per module)
+│   └── corrections.py           #   cross-benchmark human-correction memory
+└── snakefile/                  # executable-workflow generation
+    ├── generator.py             #   derives Snakefile inputs from benchmark.jsonld
+    └── renderer.py               #   renders the actual Snakefile text
 ```
 
 ## License
