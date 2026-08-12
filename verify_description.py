@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
 """
 verify_description.py
 

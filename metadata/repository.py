@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
 """
 metadata.repository
 
@@ -18,8 +22,15 @@ from pathlib import Path
 
 from utils import camel_to_label, read_text
 
+# REUSE-IgnoreStart
+# (the two patterns below contain literal "SPDX-License-Identifier:" /
+# "SPDX-FileCopyrightText:" substrings used to *parse* other files' headers,
+# not an actual header of this file -- reuse-tool's naive text scan would
+# otherwise misdetect them and try to parse what follows as this file's own
+# SPDX License Expression / copyright line.)
 SPDX_LICENSE_PATTERN = re.compile(r"SPDX-License-Identifier:\s*([^\s*]+)")
 SPDX_COPYRIGHT_PATTERN = re.compile(r"SPDX-FileCopyrightText:\s*(?:Copyright\s*(?:©|\(c\))?\s*)?([^\n*]+)")
+# REUSE-IgnoreEnd
 CLASS_NAME_PATTERN = re.compile(r"\bclass\s+([A-Z]\w+)\s*(?::\s*public|\{)")
 
 

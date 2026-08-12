@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
 """Generic helpers with no domain coupling -- string/number/file utilities
 used across the metadata, ai, and snakefile packages.
 """

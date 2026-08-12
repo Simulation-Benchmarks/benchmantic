@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
 """
 metadata.builder
 
@@ -943,7 +947,7 @@ def build(args: argparse.Namespace) -> None:
 
     print(f"\nFinal Selection Confirmed.")
     print(f"Scenario-Specific: {', '.join(c.key for c in selected_candidates)}")
-    print(f"Global/Constant:   {', '.join(c.key for c in raw_candidates if c not in selected_candidates) or 'None'}\n")
+    print(f"Tool-specific:   {', '.join(c.key for c in raw_candidates if c not in selected_candidates) or 'None'}\n")
 
     # 4. Cache Management & AI Inference (ONLY for the selected parameters)
     metadata_cache = load_cache(module_dir) or []

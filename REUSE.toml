@@ -1,0 +1,11 @@
+version = 1
+
+[[annotations]]
+path = "**.pyc"
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ".gitignore"
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"

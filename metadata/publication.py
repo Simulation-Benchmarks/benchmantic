@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
 """
 metadata.publication
 
