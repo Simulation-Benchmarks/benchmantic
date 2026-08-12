@@ -26,7 +26,9 @@ from ai.cache import (
     cache_path, load_cache, load_metric_cache, metric_cache_path,
     save_cache, save_metric_cache,
 )
+from ai import corrections as corrections_store
 from ai.inference import DEFAULT_PROVIDER, PROVIDER_CONFIG, infer_metric_metadata, infer_parameter_metadata
+import review
 from metadata.metrics import (
     DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metric_fields,
     discover_metrics_from_maincc,
@@ -761,6 +763,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "Without this flag, stale cache entries that no longer correspond to a "
                           "real params.input key or main.cc metric are pruned automatically, but "
                           "still-valid cached entries are reused as normal.")
+    ap.add_argument("--skip-review", action="store_true",
+                     help="Skip the interactive review/edit step after AI inference and accept the "
+                          "inferred parameter/metric metadata as-is. Required for non-interactive/CI "
+                          "runs (this step needs a real terminal for input()), same as --scenario-params.")
+    ap.add_argument("--review-confidence-threshold", type=float, default=review.DEFAULT_CONFIDENCE_THRESHOLD,
+                     help=f"During review, flag any parameter/metric with confidence below this value and "
+                          f"refuse a plain 'yes' at the final-confirmation prompt until it's either fixed "
+                          f"or explicitly accepted by typing 'accept' (default: {review.DEFAULT_CONFIDENCE_THRESHOLD}). "
+                          "Has no effect with --skip-review.")
     ap.add_argument("--skip-validation", action="store_true",
                      help="Skip the automatic RO-Crate 1.1 conformance check that normally runs "
                           "after writing the output (via the 'rocrate_validator' package -- "
@@ -985,6 +996,13 @@ def build(args: argparse.Namespace) -> None:
     if missing_candidates:
         resolved_model = args.model or PROVIDER_CONFIG[args.provider]["default_model"]
         print(f"\nQuerying {args.provider} ({resolved_model}) for {len(missing_candidates)} parameter(s) not found in cache...")
+        # Prior human corrections to similarly named/typed parameters (from
+        # ANY module reviewed with this checkout before) -- included as
+        # guidance in the prompt so the model doesn't repeat a mistake a
+        # human already fixed once. See ai.corrections / review.py.
+        known_corrections = corrections_store.relevant_corrections_for(
+            [c.key for c in missing_candidates], "parameter",
+        )
         try:
             new_inferred = infer_parameter_metadata(
                 candidates=missing_candidates,
@@ -994,6 +1012,7 @@ def build(args: argparse.Namespace) -> None:
                 provider=args.provider,
                 model=args.model,
                 verbose=args.verbose,
+                known_corrections=known_corrections,
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1025,13 +1044,10 @@ def build(args: argparse.Namespace) -> None:
             # stand-ins, so a future run should retry the API rather than reuse them.
         else:
             final_metadata.extend(new_inferred)
-
-            # Merge the newly inferred entries into the on-disk cache, keeping
-            # any previously cached entries untouched.
-            merged_cache = dict(cache_lookup)
-            for item in new_inferred:
-                merged_cache[(item["ini"][0], item["ini"][1])] = item
-            save_cache(module_dir, list(merged_cache.values()))
+            # NOTE: not saved to the on-disk cache here -- final_metadata may
+            # still be edited during the review step below, and the cache
+            # should hold the FINAL (possibly human-corrected) values, not
+            # the raw AI output. See the save_cache() call after review.
     else:
         print("Using cached parameter metadata (loaded from local file, 0 API queries triggered).")
 
@@ -1050,6 +1066,25 @@ def build(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
         print(f"Capturing full multi-token value for {matched} parameter(s): {args.full_value_params}")
+
+    # 4c. Interactive review -- show the table, let the reviewer edit any
+    # field, loop until they say it's final (skipped entirely with
+    # --skip-review, e.g. for CI). Whatever comes out of this -- AI's
+    # original values, or a reviewer's edits -- is what actually gets
+    # cached and built into the graph below.
+    final_metadata, param_corrections = review.review_or_skip(
+        final_metadata, "parameter", args.skip_review, args.review_confidence_threshold,
+    )
+    corrections_store.append_corrections(param_corrections)
+
+    # Cache the FINAL parameter metadata (post-review), so a future run of
+    # this same module reuses the reviewed values without asking again --
+    # not just the newly-inferred ones, since a reviewer may have also
+    # edited an entry that came from the cache.
+    merged_cache = dict(cache_lookup)
+    for item in final_metadata:
+        merged_cache[(item["ini"][0], item["ini"][1])] = item
+    save_cache(module_dir, list(merged_cache.values()))
 
     filtered_parameter_fields = build_parameter_fields(final_metadata)
 
@@ -1089,6 +1124,9 @@ def build(args: argparse.Namespace) -> None:
         resolved_model = args.model or PROVIDER_CONFIG[args.provider]["default_model"]
         print(f"\nQuerying {args.provider} ({resolved_model}) for "
               f"{len(missing_metric_candidates)} metric(s) not found in cache...")
+        known_metric_corrections = corrections_store.relevant_corrections_for(
+            [c.key for c in missing_metric_candidates], "metric",
+        )
         try:
             new_inferred_metrics = infer_metric_metadata(
                 candidates=missing_metric_candidates,
@@ -1098,6 +1136,7 @@ def build(args: argparse.Namespace) -> None:
                 provider=args.provider,
                 model=args.model,
                 verbose=args.verbose,
+                known_corrections=known_metric_corrections,
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1126,12 +1165,20 @@ def build(args: argparse.Namespace) -> None:
             # Deliberately NOT written to the cache, same rationale as parameters.
         else:
             final_metric_metadata.extend(new_inferred_metrics)
-            merged_metric_cache = dict(metric_cache_lookup)
-            for item in new_inferred_metrics:
-                merged_metric_cache[item["key"]] = item
-            save_metric_cache(module_dir, list(merged_metric_cache.values()))
+            # Not saved to the cache yet -- same rationale as parameters:
+            # the review step below may still edit these values.
     else:
         print("Using cached metric metadata (loaded from local file, 0 API queries triggered).")
+
+    final_metric_metadata, metric_corrections = review.review_or_skip(
+        final_metric_metadata, "metric", args.skip_review, args.review_confidence_threshold,
+    )
+    corrections_store.append_corrections(metric_corrections)
+
+    merged_metric_cache = dict(metric_cache_lookup)
+    for item in final_metric_metadata:
+        merged_metric_cache[item["key"]] = item
+    save_metric_cache(module_dir, list(merged_metric_cache.values()))
 
     filtered_metric_fields = build_metric_fields(final_metric_metadata)
 

@@ -153,9 +153,16 @@ def infer_parameter_metadata(
     retries: int = 3,
     retry_delay: float = 2.0,
     verbose: bool = False,
+    known_corrections: list[dict] | None = None,
 ) -> list[dict]:
-    """Ask an LLM (Groq or OpenAI) to infer semantic metadata for all discovered parameters."""
-    prompt = build_prompt(candidates, main_cc, problem_hh, benchmark_description)
+    """Ask an LLM (Groq or OpenAI) to infer semantic metadata for all discovered parameters.
+
+    `known_corrections` (optional -- see ai.corrections.relevant_corrections_for)
+    is a list of prior human corrections to similarly named/typed parameters,
+    included in the prompt as guidance so the model doesn't repeat a mistake
+    a human already fixed once.
+    """
+    prompt = build_prompt(candidates, main_cc, problem_hh, benchmark_description, known_corrections)
     return _query_llm_json_array(
         provider=provider,
         model=model,
@@ -181,11 +188,14 @@ def infer_metric_metadata(
     retries: int = 3,
     retry_delay: float = 2.0,
     verbose: bool = False,
+    known_corrections: list[dict] | None = None,
 ) -> list[dict]:
     """Ask an LLM (Groq or OpenAI) to infer semantic metadata -- with SI
     units -- for all discovered output/solution metrics.
+
+    `known_corrections` -- see infer_parameter_metadata().
     """
-    prompt = build_metric_prompt(candidates, main_cc, problem_hh, benchmark_description)
+    prompt = build_metric_prompt(candidates, main_cc, problem_hh, benchmark_description, known_corrections)
     return _query_llm_json_array(
         provider=provider,
         model=model,

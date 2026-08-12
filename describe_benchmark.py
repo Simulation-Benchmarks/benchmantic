@@ -44,9 +44,18 @@ moves both artifacts into outputs/<software-name>/ together.
 
 By default, output is quiet -- one short line per step, with the full
 underlying output only shown if something fails. Pass --verbose (-v) to
-always see it live. Exception: if --scenario-params isn't given, the
-interactive parameter-selection prompt always runs live (it needs a real
-terminal for input()), regardless of --verbose.
+always see it live. Exception: if --scenario-params isn't given, or unless
+--skip-review is passed, the interactive parameter-selection prompt and/or
+metadata review step always run live (both need a real terminal for
+input()), regardless of --verbose.
+
+After AI inference, each discovered parameter/metric is shown in a table
+for review -- edit any field, loop until you confirm it's final, then the
+(possibly corrected) result is what gets cached and built into
+benchmark.jsonld. Pass --skip-review to accept the AI's output as-is (e.g.
+for CI). Anything you correct is also remembered across benchmarks (see
+ai.corrections) and offered back to the AI as guidance next time it infers
+a similarly named/typed item.
 
 Usage
 -----
@@ -137,6 +146,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     meta.add_argument("--model", type=str, default=None)
     meta.add_argument("--clear-cache", action="store_true")
     meta.add_argument("--fallback-on-error", action="store_true")
+    meta.add_argument("--skip-review", action="store_true",
+                       help="Skip the interactive review/edit step after AI inference (required for "
+                            "non-interactive/CI runs -- it needs a real terminal for input()).")
+    meta.add_argument("--review-confidence-threshold", type=float, default=None,
+                       help="Flag parameters/metrics below this confidence during review and require "
+                            "an explicit 'accept' to confirm them as final (default: see "
+                            "metadata.builder's own default). Has no effect with --skip-review.")
     meta.add_argument("--skip-validation", action="store_true")
 
     # --- snakefile.generator pass-through ---
@@ -194,18 +210,26 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         fallback_on_error=args.fallback_on_error,
         verbose=args.verbose,
         clear_cache=args.clear_cache,
+        skip_review=args.skip_review,
+        review_confidence_threshold=(
+            args.review_confidence_threshold
+            if args.review_confidence_threshold is not None
+            else builder.review.DEFAULT_CONFIDENCE_THRESHOLD
+        ),
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",
     )
-    # The interactive parameter-selection prompt (metadata.parameters) only
-    # runs when --scenario-params wasn't supplied -- and it needs a real
-    # terminal (it calls input()), so it can't be silently captured into
-    # the quiet-mode buffer the way the rest of this step's output can.
-    # Force live output for just this step in that case, regardless of
-    # --verbose, so the prompt (and what you type) actually show up.
-    needs_interactive = args.scenario_params is None
+    # Two sub-steps inside metadata.builder.build() need a real terminal
+    # (they call input()), so their output can't be silently captured into
+    # the quiet-mode buffer the way the rest of this step's output can:
+    # the parameter-selection prompt (only when --scenario-params wasn't
+    # supplied), and the interactive metadata review step (unless
+    # --skip-review was passed). Force live output for the whole step
+    # whenever either applies, regardless of --verbose, so prompts (and
+    # what you type) actually show up.
+    needs_interactive = args.scenario_params is None or not args.skip_review
     if needs_interactive and not args.verbose:
-        print("   (no --scenario-params given -- showing the interactive parameter selection live)")
+        print("   (interactive parameter selection and/or metadata review is enabled -- showing this step live)")
     run_step("Generating semantic description", args.verbose or needs_interactive, builder.build, builder_args)
 
     software_name = args.software_name or generator.derive_software_name(load_graph(staged_benchmark))

@@ -69,6 +69,14 @@ name alone -- e.g. a variable named `density_`/`rho_` implies kg/m3, a
 variable read as `omega_`/an angular velocity implies rad/s, `viscosity_`
 (dynamic) implies Pa*s, `radius_`/`length_` implies m.
 
+You may also be shown "known corrections from prior human review": cases
+where a human reviewer corrected an earlier AI guess for a similarly named
+or similarly typed item, possibly in a different benchmark module. Treat
+these as strong evidence for how a human expert wants this KIND of item
+handled -- but still infer each requested item independently and precisely
+from its own code context; do not copy a correction's exact values onto a
+different item just because the name is similar.
+
 A benchmark description (a doc-comment from the source, if available) and
 the full main.cc/problem.hh source are provided only as background context
 to help you understand what the parameters mean -- e.g. what physical
@@ -103,6 +111,14 @@ params.input -- infer metadata for EXACTLY these {n_items} parameter(s), no othe
 =====================
 
 {parameter_json}
+
+=====================
+known corrections from prior human review (guidance only -- weigh this
+evidence for similarly named/typed items, but still infer each item above
+independently from its own code context)
+=====================
+
+{known_corrections}
 
 =====================
 main.cc (background context only -- do not infer metadata for anything here
@@ -141,16 +157,36 @@ text before the opening '[' or after the closing ']'.
 """
 
 
+def _format_known_corrections(known_corrections: list[dict] | None) -> str:
+    """Render ai.corrections entries (see ai.corrections.relevant_corrections_for)
+    as short human-readable lines for the prompt. Returns a placeholder
+    string when there's nothing relevant yet, so the prompt template always
+    has something to show for this section.
+    """
+    if not known_corrections:
+        return "(none available yet)"
+    lines = []
+    for c in known_corrections:
+        loc = f'{c["section"]}.{c["key"]}' if c.get("section") else c.get("key", "?")
+        lines.append(
+            f'- {loc}: AI originally suggested {json.dumps(c.get("ai_suggested", {}))}, '
+            f'a human reviewer corrected it to {json.dumps(c.get("user_corrected", {}))}.'
+        )
+    return "\n".join(lines)
+
+
 def build_prompt(
     candidates: list[ParameterCandidate],
     main_cc: str,
     problem_hh: str,
     benchmark_description: str = "",
+    known_corrections: list[dict] | None = None,
 ) -> str:
     return PROMPT_TEMPLATE.format(
         benchmark_description=benchmark_description or "(none found)",
         n_items=len(candidates),
         parameter_json=json.dumps([asdict(c) for c in candidates], indent=2),
+        known_corrections=_format_known_corrections(known_corrections),
         main_cc=main_cc,
         problem_hh=problem_hh,
     )
@@ -232,6 +268,14 @@ metrics -- infer metadata for EXACTLY these {n_items} metric(s), no others
 {metric_json}
 
 =====================
+known corrections from prior human review (guidance only -- weigh this
+evidence for similarly named/typed items, but still infer each item above
+independently from its own code context)
+=====================
+
+{known_corrections}
+
+=====================
 main.cc (background context only -- do not infer metadata for anything here
 that isn't also listed under metrics above)
 =====================
@@ -267,16 +311,30 @@ text before the opening '[' or after the closing ']'.
 """
 
 
+def _format_known_metric_corrections(known_corrections: list[dict] | None) -> str:
+    if not known_corrections:
+        return "(none available yet)"
+    lines = []
+    for c in known_corrections:
+        lines.append(
+            f'- {c.get("key", "?")}: AI originally suggested {json.dumps(c.get("ai_suggested", {}))}, '
+            f'a human reviewer corrected it to {json.dumps(c.get("user_corrected", {}))}.'
+        )
+    return "\n".join(lines)
+
+
 def build_metric_prompt(
     candidates: list[MetricCandidate],
     main_cc: str,
     problem_hh: str,
     benchmark_description: str = "",
+    known_corrections: list[dict] | None = None,
 ) -> str:
     return METRIC_PROMPT_TEMPLATE.format(
         benchmark_description=benchmark_description or "(none found)",
         n_items=len(candidates),
         metric_json=json.dumps([asdict(c) for c in candidates], indent=2),
+        known_corrections=_format_known_metric_corrections(known_corrections),
         main_cc=main_cc,
         problem_hh=problem_hh,
     )
