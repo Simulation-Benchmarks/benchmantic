@@ -31,6 +31,15 @@ class ParameterCandidate:
     #: main.cc/problem.hh -- e.g. "assigned to `density_` (C++ type `Scalar`)".
     #: See scan_getparam_hints() / attach_cpp_hints(). Empty if none found.
     cpp_hint: str = ""
+    #: A short window of the actual source code around that getParam<>()
+    #: call site (a few hundred characters) -- NOT the whole file. This,
+    #: together with cpp_hint, is what ai.prompts sends the LLM as
+    #: code-grounded evidence INSTEAD OF embedding the full main.cc/
+    #: problem.hh in every inference request (which used to dominate prompt
+    #: size and regularly exceeded provider per-request token/payload
+    #: limits). Empty if no getParam<>() call site was found for this
+    #: candidate. See GETPARAM_CONTEXT_CHARS / scan_getparam_hints().
+    code_context: str = ""
 
 
 def discover_parameters(params_input: Path) -> list[ParameterCandidate]:
@@ -55,35 +64,43 @@ GETPARAM_PATTERN = re.compile(
 )
 
 
-def scan_getparam_hints(*source_texts: str) -> dict[str, str]:
+#: Chars of raw source grabbed on each side of a getParam<>() call site for
+#: ParameterCandidate.code_context -- deliberately small (this is meant as
+#: a targeted snippet, not a substitute for the old full-file dump).
+GETPARAM_CONTEXT_CHARS = 120
+
+
+def scan_getparam_hints(*source_texts: str) -> dict[str, tuple[str, str]]:
     """Scan one or more C++ source files for getParam<Type>("Section.Key")
     call sites and return a dict keyed by lowercased "section.key" ->
-    human-readable hint string describing the variable name and C++ type.
+    (human-readable hint, small code excerpt around the call site).
     """
-    hints: dict[str, str] = {}
+    hints: dict[str, tuple[str, str]] = {}
     for text in source_texts:
         if not text:
             continue
-        for var, cpp_type, ini_key in GETPARAM_PATTERN.findall(text):
-            cpp_type = cpp_type.strip()
+        for match in GETPARAM_PATTERN.finditer(text):
+            var, cpp_type, ini_key = match.group(1), match.group(2).strip(), match.group(3)
             if var:
                 hint = f"assigned to variable `{var}` (C++ type `{cpp_type}`)"
             else:
                 hint = f"read with C++ type `{cpp_type}`"
-            hints[ini_key.lower()] = hint
+            start = max(0, match.start() - GETPARAM_CONTEXT_CHARS)
+            end = min(len(text), match.end() + GETPARAM_CONTEXT_CHARS)
+            hints[ini_key.lower()] = (hint, text[start:end].strip())
     return hints
 
 
 def attach_cpp_hints(candidates: list[ParameterCandidate], *source_texts: str) -> None:
-    """Mutate `candidates` in place, filling in cpp_hint for any candidate
-    whose "Section.Key" matches a getParam<>() call site found in the given
-    source texts (typically main.cc and problem.hh).
+    """Mutate `candidates` in place, filling in cpp_hint/code_context for
+    any candidate whose "Section.Key" matches a getParam<>() call site
+    found in the given source texts (typically main.cc and problem.hh).
     """
     hints = scan_getparam_hints(*source_texts)
     for c in candidates:
-        hint = hints.get(f"{c.section}.{c.key}".lower())
-        if hint:
-            c.cpp_hint = hint
+        found = hints.get(f"{c.section}.{c.key}".lower())
+        if found:
+            c.cpp_hint, c.code_context = found
 
 
 # ============================================================

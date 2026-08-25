@@ -135,6 +135,45 @@ def extract_json_array(raw: str) -> str:
     return text
 
 
+def _backfill_missing_ini(data: list, candidates: list[ParameterCandidate] | None) -> None:
+    """Some models (seen with Groq's openai/gpt-oss-120b) drop the requested
+    "ini" field from every item entirely, despite the prompt's explicit
+    schema example -- while still returning the same count of items, in the
+    same order, as the requested candidate list (the STRICT OUTPUT RULE
+    the prompt asks for). Rather than failing the whole batch and burning a
+    retry attempt on what's really just a formatting slip, backfill "ini"
+    positionally from the candidates the model was actually asked about.
+
+    Deliberately conservative: only fires when EVERY item is missing "ini"
+    AND the item count matches the candidate count exactly -- anything else
+    (partial omission, a different count) is too ambiguous to guess safely,
+    so it's left alone for the normal required-field/count checks below to
+    catch.
+
+    This does NOT touch the model's own reported "confidence" -- that number
+    is the model's actual assessment of the physical inference (unit,
+    quantity kind, semantic name), which the backfill has no bearing on and
+    shouldn't overwrite or hide. Instead, backfilled items are marked with
+    "_needs_verification" -- a separate signal review.py's review gate
+    treats the same way as low confidence (it forces a look before a plain
+    accept), without claiming the model itself was unsure. See review.py's
+    _flagged_indices().
+    """
+    if not candidates or len(data) != len(candidates):
+        return
+    if not all(isinstance(item, dict) and "ini" not in item for item in data):
+        return
+    for item, candidate in zip(data, candidates):
+        item["ini"] = [candidate.section, candidate.key]
+        item["_needs_verification"] = "'ini' backfilled positionally -- model omitted it; please verify this mapping."
+    print(
+        f"warning: model response omitted the 'ini' field for all {len(data)} item(s); "
+        "backfilled positionally from the requested parameter order and flagged for review "
+        "(the model's own confidence scores are kept as-is).",
+        file=sys.stderr,
+    )
+
+
 def validate_metadata(
     data: list[dict],
     candidates: list[ParameterCandidate] | None = None,
@@ -152,6 +191,8 @@ def validate_metadata(
     """
     if not isinstance(data, list):
         raise ValueError("Model returned something other than a JSON list.")
+
+    _backfill_missing_ini(data, candidates)
 
     validated = []
     for item in data:
@@ -225,6 +266,27 @@ def validate_metadata(
 REQUIRED_METRIC_FIELDS = ("key", "semantic_name", "datatype", "unit")
 
 
+def _backfill_missing_key(data: list, candidates: list[MetricCandidate] | None) -> None:
+    """Metric-side counterpart of _backfill_missing_ini() above -- same
+    positional-backfill rationale, same conservative all-or-nothing/exact-
+    count guard. Also leaves the model's own "confidence" untouched and uses
+    "_needs_verification" instead -- see _backfill_missing_ini()'s docstring.
+    """
+    if not candidates or len(data) != len(candidates):
+        return
+    if not all(isinstance(item, dict) and "key" not in item for item in data):
+        return
+    for item, candidate in zip(data, candidates):
+        item["key"] = candidate.key
+        item["_needs_verification"] = "'key' backfilled positionally -- model omitted it; please verify this mapping."
+    print(
+        f"warning: model response omitted the 'key' field for all {len(data)} item(s); "
+        "backfilled positionally from the requested metric order and flagged for review "
+        "(the model's own confidence scores are kept as-is).",
+        file=sys.stderr,
+    )
+
+
 def validate_metric_metadata(
     data: list[dict],
     candidates: list[MetricCandidate] | None = None,
@@ -235,6 +297,8 @@ def validate_metric_metadata(
     """
     if not isinstance(data, list):
         raise ValueError("Model returned something other than a JSON list.")
+
+    _backfill_missing_key(data, candidates)
 
     validated = []
     for item in data:

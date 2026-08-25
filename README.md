@@ -5,7 +5,7 @@ Generates a shareable, machine-readable semantic description (RO-Crate JSON-LD) 
 ## Pipeline diagram
 
 ```
-source code folder
+local folder or git URL
   (params.input, C++ source, README, build config)
         │
         ▼
@@ -28,9 +28,10 @@ workflow.py runs all of the above in one command
 
 ## Features
 
+- Works from a local checkout or a remote source alike: `<module_dir>` accepts a local folder path, or a GitHub/GitLab/any git-reachable URL, cloned into a throwaway temp directory that's deleted once the run finishes (pass `--keep-clone` to reuse a persistent local clone across runs instead).
 - Discovers input parameters and output metrics directly from source (`params.input`, `main.cc`, `problem.hh`), plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`.
-- Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in `getParam<Type>()` call-site hints from the C++ source, not just the raw config key name.
-- Interactive review step: before anything is built into the graph, every inferred parameter/metric is shown in an editable table. Rows below a confidence threshold (default 0.7) are flagged and block a plain confirm until they're fixed or explicitly accepted.
+- Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in a compact `getParam<Type>()` call-site excerpt from the C++ source (not the raw config key name alone, and not the whole file), automatically batched (`--inference-batch-size`) to keep every request small regardless of how many parameters/metrics a benchmark has.
+- Interactive review step: before anything is built into the graph, every inferred parameter/metric is shown in an editable table. Rows below a confidence threshold (default 0.7), or flagged for a structural reason unrelated to the AI's own confidence, get a visual marker — press Enter to accept the table as shown either way, or type a row number to fix one first.
 - Cross-benchmark corrections memory: whenever a reviewer edits an AI-inferred value, that correction is remembered and offered back to the LLM as guidance the next time a similarly named/typed parameter shows up, even in a different benchmark module.
 - Caches inferred (and reviewed) metadata on disk so repeated runs don't re-query the API, and prunes stale cache entries automatically.
 - Assembles a [metadata4ing](https://w3id.org/nfdi4ing/metadata4ing)/RO-Crate 1.1-conformant `@graph` describing the benchmark, its parameter sets, metrics, license, software, and authors.
@@ -86,21 +87,23 @@ python3 workflow.py <module_dir> \
     --mesh-split --zip-name-flag Problem.Name
 ```
 
-`<module_dir>` can be the exact benchmark folder or a repository checkout containing one. This walks you through reviewing the AI-inferred parameter/metric metadata, then writes `benchmark.jsonld` and a packaged `Snakefile` to `outputs/<software-name>/`, renders a Markdown review table, and validates the result — exiting non-zero if verification fails.
+`<module_dir>` can be the exact benchmark folder, a repository checkout containing one, or a GitHub/GitLab/any git URL (e.g. `https://github.com/org/repo`, or `git@host:org/repo.git`) — in which case it's cloned into a throwaway temp directory that's deleted once this run finishes, so nothing accumulates on disk by default. Pass `--keep-clone` to clone into a persistent local cache instead, reused (fetch + checkout in place) by a later run against the same URL, along with its inference cache — useful if you're iterating on the same remote benchmark repeatedly and don't want to re-query the LLM every time. `--ref <branch-or-tag-or-commit>` pins what's checked out, `--clone-dir` picks an explicit clone location (implies `--keep-clone`), and `--fresh-clone` discards and re-clones an existing persistent one. This walks you through reviewing the AI-inferred parameter/metric metadata, then writes `benchmark.jsonld` and a packaged `Snakefile` to `outputs/<software-name>/`, renders a Markdown review table, and validates the result — exiting non-zero if verification fails.
 
-For non-interactive/CI runs, add `--skip-review` (and make sure `--scenario-params` is always passed, since omitting it also triggers an interactive prompt). Skip individual pipeline steps with `--skip-show` / `--skip-check`. Tune how strict the review gate is with `--review-confidence-threshold` (default `0.7`). Run any script with `--help` for its full option list.
+The review step is one prompt: type a row number to edit it, or press Enter to accept the table as shown and continue — rows below `--review-confidence-threshold` (default `0.7`) or flagged for a structural reason (e.g. a repaired mapping) show a `!`/`?` marker so they're easy to spot first, but Enter always accepts, flagged or not.
+
+For non-interactive/CI runs, add `--skip-review` (and make sure `--scenario-params` is always passed, since omitting it also triggers an interactive prompt). Skip individual pipeline steps with `--skip-show` / `--skip-check`. Run any script with `--help` for its full option list.
 
 ## Architecture / Pipeline walkthrough
 
 `describe_benchmark.py` is the single entry point, and runs five stages in process (calling `metadata.builder` and `snakefile.generator` directly, not via subprocess):
 
-1. **Discover** (`metadata.repository`, `metadata.parameters`, `metadata.metrics`) — scans the module for parameter and metric candidates, and scrapes license, dependency, build, citation, and author information from source and README. Parameters can be selected via `--scenario-params`, or interactively if omitted.
+1. **Discover** (`repo_source`, `metadata.repository`, `metadata.parameters`, `metadata.metrics`) — first resolves `module_dir`: a local path is used as-is; a git URL is cloned into a throwaway temp directory, deleted automatically once the run finishes (or, with `--keep-clone`, into a persistent cache directory instead — default `.benchmantic_repo_cache/`, override with `BENCHMANTIC_REPO_CACHE` or `--clone-dir`). Then scans the resolved module for parameter and metric candidates, and scrapes license, dependency, build, citation, and author information from source and README. Parameters can be selected via `--scenario-params`, or interactively if omitted.
 2. **Infer** (`ai.cache`, `ai.inference`) — for every candidate not already cached, asks an LLM to infer its physical meaning. This is broken down further inside the `ai/` package:
-   - `ai.prompts` builds the prompt, assembling the benchmark's description, the candidate parameters/metrics, the relevant source code, and any relevant prior human corrections (see `ai.corrections` below) as context.
-   - `ai.inference` queries the configured provider (Groq by default, or OpenAI), retrying up to 3 times on failure.
+   - `ai.prompts` builds the prompt from the benchmark's description, the candidate parameters/metrics, and any relevant prior human corrections (see `ai.corrections` below) — deliberately *not* the full `main.cc`/`problem.hh` source. Each parameter already carries its own `getParam<>()` call-site excerpt (`metadata.parameters.attach_cpp_hints`) and each metric its own surrounding-code snippet (`metadata.metrics.discover_metrics`), which is far smaller and just as code-grounded; the full file is only searched as a last-resort fallback for the rare item with no per-item context of its own.
+   - `ai.inference` queries the configured provider (Groq by default, or OpenAI), retrying up to 3 times on failure, splitting more than `--inference-batch-size` (default 8) not-yet-cached items into multiple independent requests, and failing fast (no pointless retries/waits) on an unrecoverable size/rate-limit response instead of exhausting all 3 attempts on something retrying can't fix.
    - `ai.validation` checks the response for missing fields, out-of-range indices, and unit/quantityKind mix-ups, correcting or flagging them.
    - `ai.cache` persists the final (post-review) result beside the module, so each item is inferred only once.
-3. **Review** (`review.py`) — prints every parameter/metric in an editable table (semantic name, datatype, unit, quantity kind, confidence). Type a row number to edit any field, or Enter to finish; rows below the confidence threshold are flagged and require either a fix or an explicit `accept` before you can continue. Skipped entirely with `--skip-review`. Every value actually changed here is recorded by `ai.corrections`, which persists it (matched by exact or fuzzy key similarity) so a similarly named/typed parameter in a *different* benchmark benefits from it too, next time it's inferred.
+3. **Review** (`review.py`) — prints every parameter/metric in an editable table (semantic name, datatype, unit, quantity kind, confidence). One prompt: type a row number to edit any field, or press Enter to accept the table as shown and continue. Rows below the confidence threshold get a `!`, and rows with a structural (not confidence) issue -- e.g. the model omitted the `ini`/`key` field and it had to be reconstructed positionally, see `ai.validation` -- get a `?`; both are just visual flags, Enter always accepts regardless. Skipped entirely with `--skip-review`. Every value actually changed here is recorded by `ai.corrections`, which persists it (matched by exact or fuzzy key similarity) so a similarly named/typed parameter in a *different* benchmark benefits from it too, next time it's inferred.
 4. **Build** (`metadata.builder`) — wraps each reviewed value, along with the scraped manifest info, into typed nodes inside one metadata4ing `@graph` (`GraphBuilder`).
 5. **Validate & Generate** (`metadata.builder`, `snakefile.generator`, `snakefile.renderer`) — checks the graph against the RO-Crate 1.1 profile, then writes `benchmark.jsonld` and a packaged `Snakefile`.
 
@@ -120,6 +123,7 @@ benchmantic/
 ├── show_description.py       # renders benchmark.jsonld as Markdown for review
 ├── verify_description.py     # validates benchmark.jsonld against semantic_benchmark
 ├── workflow.py                # runs the three scripts above as one CI-friendly pipeline
+├── repo_source.py             # resolves module_dir: local path, or clone/update a git URL
 ├── utils.py                   # shared string/number/file helpers
 ├── metadata/                  # benchmark.jsonld generation
 │   ├── builder.py             #   orchestrates manifest + RO-Crate @graph construction

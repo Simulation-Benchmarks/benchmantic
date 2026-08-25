@@ -36,10 +36,10 @@ DIFFABLE_FIELDS = ("semantic_name", "datatype", "unit", "quantityKind")
 
 ALLOWED_DATATYPES = ("schema:Integer", "schema:Float", "schema:Double", "schema:String")
 
-#: Below this confidence, a row is flagged in the table and "is this final?"
-#: refuses a plain yes -- the reviewer has to either fix the row or type
-#: 'accept' explicitly to acknowledge they're shipping an uncertain AI guess
-#: on purpose. Override via --review-confidence-threshold.
+#: Below this confidence, a row is flagged ('!') in the table so it's easy
+#: to spot before pressing Enter -- it doesn't block accepting on its own;
+#: Enter always accepts the table as shown, flagged rows included. Override
+#: via --review-confidence-threshold.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 
 
@@ -63,12 +63,25 @@ def _confidence(item: dict) -> float:
         return 1.0
 
 
-def _low_confidence_indices(items: list[dict], threshold: float) -> list[int]:
-    """Rows still below `threshold` that haven't been touched this session
-    -- an edit always resets confidence to 1.0 (see _edit_row()), so this is
-    exactly "AI guesses the reviewer hasn't looked at or accepted yet".
+def _flagged_indices(items: list[dict], threshold: float) -> list[int]:
+    """Rows that still need a look before a plain accept, and haven't been
+    touched this session yet (an edit always resets confidence to 1.0 and
+    clears "_needs_verification" -- see _edit_row()). Two independent
+    reasons flag a row:
+      - low confidence: the model's own reported uncertainty about the
+        physical inference (unit, quantity kind, semantic name).
+      - "_needs_verification": a structural repair (e.g. ai.validation
+        backfilling a missing 'ini'/'key' field positionally) that has
+        nothing to do with the model's confidence in the physics, but still
+        needs a human to confirm the row-to-parameter mapping is correct.
+    These are deliberately kept distinct (see _print_table()'s '!' vs '?')
+    rather than folded into one number, so a low "confidence" always means
+    "the AI itself wasn't sure" and nothing else.
     """
-    return [i for i, item in enumerate(items) if _confidence(item) < threshold and not item.get("_edited")]
+    return [
+        i for i, item in enumerate(items)
+        if not item.get("_edited") and (_confidence(item) < threshold or item.get("_needs_verification"))
+    ]
 
 
 def _print_table(items: list[dict], kind: str, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD) -> None:
@@ -86,6 +99,8 @@ def _print_table(items: list[dict], kind: str, threshold: float = DEFAULT_CONFID
         qk_short = qk.rsplit("/", 1)[-1] if qk else ""
         if item.get("_edited"):
             row_flag = "*"
+        elif item.get("_needs_verification"):
+            row_flag = "?"
         elif _confidence(item) < threshold:
             row_flag = "!"
         else:
@@ -101,7 +116,10 @@ def _print_table(items: list[dict], kind: str, threshold: float = DEFAULT_CONFID
     notes = []
     if any(item.get("_edited") for item in items):
         notes.append("* = edited this session")
-    if any(not item.get("_edited") and _confidence(item) < threshold for item in items):
+    if any(not item.get("_edited") and item.get("_needs_verification") for item in items):
+        notes.append("? = mapping needs verification (not a confidence issue) -- review before accepting")
+    if any(not item.get("_edited") and not item.get("_needs_verification") and _confidence(item) < threshold
+           for item in items):
         notes.append(f"! = confidence below {threshold:.2f} -- review before accepting")
     if notes:
         print("(" + "; ".join(notes) + ")")
@@ -138,6 +156,7 @@ def _edit_row(item: dict, kind: str) -> None:
         item["confidence"] = 1.0
         _append_note(item, "manually corrected by reviewer")
         item["_edited"] = True
+        item.pop("_needs_verification", None)
         print(f"  {field} -> {new_value!r}")
 
 
@@ -178,16 +197,19 @@ def interactive_review(
     """Run the CLI row-editor loop over `items` (parameter or metric
     metadata dicts, as produced by ai.validation / loaded from cache).
 
-    Rows below `confidence_threshold` are flagged with '!' in the table, and
-    a plain "yes" at the final-confirmation prompt is refused while any
-    remain untouched -- the reviewer either fixes them or types 'accept' to
-    explicitly acknowledge shipping an uncertain AI guess on purpose (which
-    is recorded in that row's explanation, so it's visible downstream too).
+    Simple by design: one prompt. Rows below `confidence_threshold` (or
+    flagged with "_needs_verification", e.g. a backfilled 'ini'/'key' --
+    see ai.validation) show a '!'/'?' marker in the table so they're easy to
+    spot, but pressing Enter always accepts the table as shown, flagged rows
+    included -- there's no separate "type 'accept' to confirm" gate to get
+    through. If you want to fix something, type its row number first; Enter
+    only when you're done looking.
 
     Returns (final_items, correction_records): final_items is the same list
-    object, mutated in place (any transient "_edited" markers are stripped
-    before returning); correction_records is one entry per field the
-    reviewer actually changed, ready for ai.corrections.append_corrections().
+    object, mutated in place (any transient "_edited"/"_needs_verification"
+    markers are stripped before returning); correction_records is one entry
+    per field the reviewer actually changed, ready for
+    ai.corrections.append_corrections().
     """
     if not items:
         return items, []
@@ -199,10 +221,18 @@ def interactive_review(
 
     while True:
         _print_table(items, kind, confidence_threshold)
-        choice = input(
-            "\nEnter a row number to edit, 'show' to reprint the table, "
-            "or press Enter when you're done editing this round: "
-        ).strip().lower()
+        flagged = _flagged_indices(items, confidence_threshold)
+        if flagged:
+            labels = ", ".join(_label(items[i], kind) for i in flagged)
+            print(f"\n{len(flagged)} row(s) flagged above -- check them before pressing Enter: {labels}")
+
+        try:
+            choice = input(
+                "\nEnter a row number to edit, 'show' to reprint the table, "
+                "or press Enter to accept and continue: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = ""
 
         if choice == "show":
             continue
@@ -213,36 +243,26 @@ def interactive_review(
             _edit_row(items[int(choice)], kind)
             continue
 
-        flagged = _low_confidence_indices(items, confidence_threshold)
-        if flagged:
-            labels = ", ".join(_label(items[i], kind) for i in flagged)
-            print(
-                f"\n{len(flagged)} row(s) are still below the confidence threshold "
-                f"({confidence_threshold:.2f}) and haven't been reviewed: {labels}"
+        # Enter -- accept the table as shown, including any still-flagged
+        # rows (each gets a note recording that it went through unedited,
+        # same as before, just without a separate confirmation step).
+        for i in flagged:
+            note = (
+                "mapping accepted as-is without correction" if items[i].get("_needs_verification")
+                else "accepted at low confidence without correction"
             )
-            try:
-                confirm = input(
-                    "Type 'accept' to confirm these as final anyway, or Enter to keep editing: "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                confirm = "accept"
-            if confirm == "accept":
-                for i in flagged:
-                    _append_note(items[i], "accepted at low confidence without correction")
-                break
-            continue  # anything else loops back to the table
-
-        try:
-            confirm = input("Is this final? [Y]es to continue, [n]o to keep editing: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            confirm = "y"
-        if confirm in ("", "y", "yes"):
-            break
-        # anything else (including 'n') loops back to the table
+            _append_note(items[i], note)
+            items[i].pop("_needs_verification", None)
+        break
 
     corrections = _diff_corrections(originals, items, kind)
     for item in items:
         item.pop("_edited", None)
+        # Defensive only -- every code path that can break out of the loop
+        # above already clears this on every remaining item (either via
+        # _edit_row() or the "accept" branch), so this should always be a
+        # no-op by the time we get here.
+        item.pop("_needs_verification", None)
     return items, corrections
 
 
@@ -255,6 +275,17 @@ def review_or_skip(
     """interactive_review(), unless `skip` is set (--skip-review) or there's
     nothing to review -- in which case the items are returned unchanged and
     no corrections are recorded.
+
+    Note: with --skip-review, any "_needs_verification" marker (see
+    ai.validation's positional-backfill repair) is left in place on the
+    returned items rather than silently dropped -- there's no review step
+    here to resolve it, so it stays visible in the cached
+    .parameter_metadata_cache.json / .metric_metadata_cache.json entry as a
+    signal that this row's parameter mapping was reconstructed, not
+    confirmed, and is worth a manual look later. It's stripped from the
+    metadata4ing graph either way (build_parameter_fields()/
+    build_metric_fields() only ever copy the specific fields the graph
+    needs).
     """
     if skip or not items:
         return items, []

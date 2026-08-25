@@ -27,7 +27,10 @@ from ai.cache import (
     save_cache, save_metric_cache,
 )
 from ai import corrections as corrections_store
-from ai.inference import DEFAULT_PROVIDER, PROVIDER_CONFIG, infer_metric_metadata, infer_parameter_metadata
+from ai.inference import (
+    DEFAULT_BATCH_SIZE, DEFAULT_PROVIDER, PROVIDER_CONFIG,
+    infer_metric_metadata, infer_parameter_metadata,
+)
 import review
 from metadata.metrics import (
     DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metric_fields,
@@ -47,6 +50,7 @@ from metadata.repository import (
 )
 from metadata.software import detect_software_label
 from utils import read_text, slugify
+import repo_source
 
 
 DEFAULT_CONTEXT = {
@@ -726,10 +730,35 @@ def validate_rocrate(doc: dict[str, Any], severity: str = "REQUIRED") -> bool:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("module_dir", type=Path,
+    ap.add_argument("module_dir", type=str,
                      help="Path to the benchmark module folder (containing main.cc, problem.hh, and "
                           "params.input file(s)), OR a higher-level repo/checkout directory -- the script "
-                          "will search recursively for the main.cc+problem.hh pair.")
+                          "will search recursively for the main.cc+problem.hh pair. Also accepts a "
+                          "GitHub/GitLab/any git-reachable URL (https://..., git://..., or an scp-like "
+                          "git@host:path spec) -- by default it's cloned into a throwaway temp directory "
+                          "that's deleted once this run finishes; see --keep-clone/--ref/--clone-dir/"
+                          "--fresh-clone.")
+    ap.add_argument("--ref", type=str, default=None,
+                     help="Branch, tag, or commit to check out when module_dir is a git URL. Ignored for "
+                          "a local module_dir. Default: the remote's default branch.")
+    ap.add_argument("--keep-clone", action="store_true",
+                     help="If module_dir is a git URL, clone it into a persistent local cache directory "
+                          "(repo_source.DEFAULT_CLONE_ROOT, override-able via the BENCHMANTIC_REPO_CACHE "
+                          "env var) instead of the default throwaway temp clone -- a later run against the "
+                          "same URL reuses it (fetch + checkout in place, not a full re-clone), including "
+                          "its .parameter_metadata_cache.json/.metric_metadata_cache.json, so repeat runs "
+                          "against the same remote benchmark don't re-query the LLM for everything every "
+                          "time. Implied by --clone-dir. Ignored for a local module_dir.")
+    ap.add_argument("--clone-dir", type=Path, default=None,
+                     help="Explicit directory to clone module_dir into, when it's a git URL, instead of "
+                          "either the default throwaway temp clone or --keep-clone's default persistent "
+                          "cache location. Implies --keep-clone (an explicit destination is a signal you "
+                          "intend to reuse it). Ignored for a local module_dir.")
+    ap.add_argument("--fresh-clone", action="store_true",
+                     help="With --keep-clone/--clone-dir: if a cached clone already exists at the target "
+                          "location, delete it and clone from scratch instead of fetching/checking it out "
+                          "in place. Has no effect on the default throwaway clone (already always fresh). "
+                          "Ignored for a local module_dir.")
     ap.add_argument("--main-cc", type=Path, default=None, dest="main_cc",
                      help="Explicit path to main.cc, only needed if more than one main.cc+problem.hh "
                           "pair is found under module_dir.")
@@ -768,10 +797,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "inferred parameter/metric metadata as-is. Required for non-interactive/CI "
                           "runs (this step needs a real terminal for input()), same as --scenario-params.")
     ap.add_argument("--review-confidence-threshold", type=float, default=review.DEFAULT_CONFIDENCE_THRESHOLD,
-                     help=f"During review, flag any parameter/metric with confidence below this value and "
-                          f"refuse a plain 'yes' at the final-confirmation prompt until it's either fixed "
-                          f"or explicitly accepted by typing 'accept' (default: {review.DEFAULT_CONFIDENCE_THRESHOLD}). "
-                          "Has no effect with --skip-review.")
+                     help=f"During review, mark any parameter/metric with confidence below this value with "
+                          f"a '!' in the table so it's easy to spot before pressing Enter to accept "
+                          f"(default: {review.DEFAULT_CONFIDENCE_THRESHOLD}). Doesn't block accepting on its own -- "
+                          "Enter always accepts the table as shown. Has no effect with --skip-review.")
+    ap.add_argument("--inference-batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                     help="Max parameters/metrics sent to the LLM in a single inference request "
+                          f"(default: {DEFAULT_BATCH_SIZE}). A benchmark with more not-yet-cached items than "
+                          "this is split into multiple independent requests instead of one large one -- "
+                          "lower this if you're still hitting a provider's per-request token/payload limit.")
     ap.add_argument("--skip-validation", action="store_true",
                      help="Skip the automatic RO-Crate 1.1 conformance check that normally runs "
                           "after writing the output (via the 'rocrate_validator' package -- "
@@ -786,6 +820,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build(args: argparse.Namespace) -> None:
+    """Resolve `module_dir` (a local path, or a git URL -- see
+    repo_source.py), run the actual build (_build_impl()), and clean up a
+    throwaway clone afterward regardless of whether the build succeeded or
+    raised. getattr() with defaults on the resolve_source() call so this
+    also works when `args` comes from a caller (e.g. describe_benchmark.py)
+    that didn't set ref/clone_dir/fresh_clone/keep_clone explicitly.
+    """
+    resolved_module_dir = repo_source.resolve_source(
+        str(args.module_dir),
+        ref=getattr(args, "ref", None),
+        clone_dir=getattr(args, "clone_dir", None),
+        fresh_clone=getattr(args, "fresh_clone", False),
+        keep_clone=getattr(args, "keep_clone", False),
+    )
+    args.module_dir = resolved_module_dir
+    try:
+        _build_impl(args)
+    finally:
+        # No-op for a local module_dir or a persistent (--keep-clone/
+        # --clone-dir) clone -- only ever removes a throwaway clone this
+        # same resolve_source() call created. Runs even if _build_impl()
+        # raised, so a failed run doesn't leave an orphaned temp clone.
+        repo_source.cleanup_ephemeral_clone(resolved_module_dir)
+
+
+def _build_impl(args: argparse.Namespace) -> None:
     if not args.module_dir.is_dir():
         sys.exit(f"Error: {args.module_dir} is not a directory")
 
@@ -1013,6 +1073,7 @@ def build(args: argparse.Namespace) -> None:
                 model=args.model,
                 verbose=args.verbose,
                 known_corrections=known_corrections,
+                batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1137,6 +1198,7 @@ def build(args: argparse.Namespace) -> None:
                 model=args.model,
                 verbose=args.verbose,
                 known_corrections=known_metric_corrections,
+                batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:

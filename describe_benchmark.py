@@ -71,8 +71,9 @@ Usage
 generated benchmark file (e.g. "DuMux" -> "dumux"). Pass it explicitly only
 to override that derived name.
 
-<module_dir> can be the exact benchmark folder or a repo checkout --
-metadata.builder resolves it the same way it always does.
+<module_dir> can be the exact benchmark folder, a repo checkout, or a
+GitHub/GitLab/any git URL -- metadata.builder resolves it the same way it
+always does (see repo_source.py for the URL-clone case).
 """
 
 from __future__ import annotations
@@ -121,9 +122,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("module_dir", type=Path,
+    ap.add_argument("module_dir", type=str,
                      help="Path to the benchmark module (or a repo checkout containing it) -- "
-                          "anything metadata.builder can already handle.")
+                          "anything metadata.builder can already handle. Also accepts a GitHub/GitLab/"
+                          "any git-reachable URL (https://..., git://..., or an scp-like git@host:path "
+                          "spec); by default it's cloned into a throwaway temp directory that's deleted "
+                          "once this run finishes -- see --keep-clone/--ref/--clone-dir/--fresh-clone.")
+    ap.add_argument("--ref", type=str, default=None,
+                     help="Branch, tag, or commit to check out when module_dir is a git URL. Ignored for "
+                          "a local module_dir. Default: the remote's default branch.")
+    ap.add_argument("--keep-clone", action="store_true",
+                     help="If module_dir is a git URL, clone it into a persistent local cache directory "
+                          "instead of the default throwaway temp clone, so a later run against the same "
+                          "URL reuses it (fetch + checkout in place) along with its inference cache, "
+                          "instead of re-querying the LLM for everything every time. Implied by "
+                          "--clone-dir. Ignored for a local module_dir.")
+    ap.add_argument("--clone-dir", type=Path, default=None,
+                     help="Explicit directory to clone module_dir into, when it's a git URL, instead of "
+                          "either the default throwaway temp clone or --keep-clone's default persistent "
+                          "cache location (repo_source.DEFAULT_CLONE_ROOT, override-able via the "
+                          "BENCHMANTIC_REPO_CACHE env var). Implies --keep-clone. Ignored for a local "
+                          "module_dir.")
+    ap.add_argument("--fresh-clone", action="store_true",
+                     help="With --keep-clone/--clone-dir: if a cached clone already exists at the target "
+                          "location, delete it and clone from scratch instead of fetching/checking it out "
+                          "in place. Has no effect on the default throwaway clone (already always fresh). "
+                          "Ignored for a local module_dir.")
     ap.add_argument("--software-name", default=None,
                      help="Software name -- both artifacts (benchmark file + zip) are written together to "
                           "outputs/<software-name>/, and it's passed through as snakefile.generator's "
@@ -150,9 +174,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                        help="Skip the interactive review/edit step after AI inference (required for "
                             "non-interactive/CI runs -- it needs a real terminal for input()).")
     meta.add_argument("--review-confidence-threshold", type=float, default=None,
-                       help="Flag parameters/metrics below this confidence during review and require "
-                            "an explicit 'accept' to confirm them as final (default: see "
-                            "metadata.builder's own default). Has no effect with --skip-review.")
+                       help="Mark parameters/metrics below this confidence with a '!' in the review table "
+                            "so they're easy to spot before pressing Enter to accept (default: see "
+                            "metadata.builder's own default). Doesn't block accepting on its own -- Enter "
+                            "always accepts the table as shown. Has no effect with --skip-review.")
+    meta.add_argument("--inference-batch-size", type=int, default=None,
+                       help="Max parameters/metrics sent to the LLM in a single inference request "
+                            "(default: see metadata.builder's own default). A benchmark with more "
+                            "not-yet-cached items than this is split into multiple independent requests -- "
+                            "lower this if you're hitting a provider's per-request token/payload limit.")
     meta.add_argument("--skip-validation", action="store_true")
 
     # --- snakefile.generator pass-through ---
@@ -201,6 +231,10 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     # beforehand unless --software-name was given explicitly).
     builder_args = argparse.Namespace(
         module_dir=args.module_dir,
+        ref=args.ref,
+        clone_dir=args.clone_dir,
+        fresh_clone=args.fresh_clone,
+        keep_clone=args.keep_clone,
         main_cc=args.main_cc,
         output=staged_benchmark,
         scenario_params=args.scenario_params,
@@ -215,6 +249,11 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
             args.review_confidence_threshold
             if args.review_confidence_threshold is not None
             else builder.review.DEFAULT_CONFIDENCE_THRESHOLD
+        ),
+        inference_batch_size=(
+            args.inference_batch_size
+            if args.inference_batch_size is not None
+            else builder.DEFAULT_BATCH_SIZE
         ),
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",

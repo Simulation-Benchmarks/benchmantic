@@ -60,14 +60,18 @@ NEVER be confused:
       quantityKind Pressure        -> unit unit:PA
       quantityKind DimensionlessRatio / Count -> unit unit:UNITLESS
 
-Some parameter entries include a "cpp_hint" field: this is scraped directly
-from the source code's getParam<Type>("Section.Key") call site (e.g. the
-exact C++ variable name and type it is assigned to, such as `density_` of
-type `Scalar`). Treat cpp_hint as strong, code-grounded evidence of the
-parameter's physical meaning and prefer it over guessing from the INI key
+Some parameter entries include a "cpp_hint" field and a "code_context"
+field: cpp_hint is scraped directly from the source code's
+getParam<Type>("Section.Key") call site (e.g. the exact C++ variable name
+and type it is assigned to, such as `density_` of type `Scalar`);
+code_context is a short excerpt of the actual surrounding source code at
+that same call site. Treat these as strong, code-grounded evidence of the
+parameter's physical meaning and prefer them over guessing from the INI key
 name alone -- e.g. a variable named `density_`/`rho_` implies kg/m3, a
 variable read as `omega_`/an angular velocity implies rad/s, `viscosity_`
-(dynamic) implies Pa*s, `radius_`/`length_` implies m.
+(dynamic) implies Pa*s, `radius_`/`length_` implies m. A parameter with
+neither field means no getParam<>() call site was found for it -- infer
+from the key name, value, and benchmark description instead.
 
 You may also be shown "known corrections from prior human review": cases
 where a human reviewer corrected an earlier AI guess for a similarly named
@@ -77,13 +81,12 @@ handled -- but still infer each requested item independently and precisely
 from its own code context; do not copy a correction's exact values onto a
 different item just because the name is similar.
 
-A benchmark description (a doc-comment from the source, if available) and
-the full main.cc/problem.hh source are provided only as background context
-to help you understand what the parameters mean -- e.g. what physical
-scenario or published benchmark this is. They will typically mention many
-more parameters, functions, and variables than the ones you were asked
-about. Do NOT infer metadata for anything other than the exact parameters
-listed under "params.input" below.
+A benchmark description (a doc-comment from the source, if available) is
+provided as background context to help you understand what physical
+scenario or published benchmark this is. Do NOT infer metadata for
+anything other than the exact parameters listed under "params.input"
+below -- you are deliberately NOT shown the rest of the source file, only
+each parameter's own code_context, so there is nothing else to notice.
 
 STRICT OUTPUT RULE: the "params.input" section below lists exactly the
 parameters you must return metadata for -- one JSON object per entry, same
@@ -98,8 +101,6 @@ preamble before or after the JSON.
 """
 
 PROMPT_TEMPLATE = """\
-The benchmark contains these files.
-
 =====================
 benchmark description
 =====================
@@ -107,7 +108,9 @@ benchmark description
 {benchmark_description}
 
 =====================
-params.input -- infer metadata for EXACTLY these {n_items} parameter(s), no others
+params.input -- infer metadata for EXACTLY these {n_items} parameter(s), no others.
+Each entry's own "cpp_hint"/"code_context" (see the system prompt) is your
+primary code-grounded evidence.
 =====================
 
 {parameter_json}
@@ -119,21 +122,7 @@ independently from its own code context)
 =====================
 
 {known_corrections}
-
-=====================
-main.cc (background context only -- do not infer metadata for anything here
-that isn't also listed under params.input above)
-=====================
-
-{main_cc}
-
-=====================
-problem.hh (background context only -- do not infer metadata for anything
-here that isn't also listed under params.input above)
-=====================
-
-{problem_hh}
-
+{fallback_context}
 Infer semantic metadata for every parameter listed under params.input above
 -- exactly {n_items} item(s), no more, no less.
 
@@ -155,6 +144,69 @@ Return JSON like:
 Return ONLY the raw JSON array. No markdown code fences, no explanation, no
 text before the opening '[' or after the closing ']'.
 """
+
+
+#: Combined character budget for the fallback-search excerpts below --
+#: deliberately small. This is a last-resort safety net for the rare
+#: candidate with no per-item cpp_hint/code_context/context of its own, NOT
+#: a replacement for the old full-file dump (that's exactly what regularly
+#: blew past provider per-request token/payload limits -- see ai.inference's
+#: 404/413 handling). Most candidates never need this at all.
+FALLBACK_CONTEXT_BUDGET = 1200
+#: Chars grabbed on each side of a fallback string match.
+FALLBACK_CONTEXT_WINDOW = 150
+
+
+def _search_snippet(needle: str, *source_texts: str, window: int = FALLBACK_CONTEXT_WINDOW) -> str:
+    """First-match, case-insensitive search for `needle` across
+    `source_texts`, returning a small window of surrounding text -- the
+    same idea as metadata.metrics.discover_metrics()'s per-candidate
+    context, just applied on demand for whichever items didn't already get
+    one. Empty string if `needle` isn't found anywhere.
+    """
+    for text in source_texts:
+        if not text:
+            continue
+        idx = text.lower().find(needle.lower())
+        if idx == -1:
+            continue
+        start = max(0, idx - window // 2)
+        end = min(len(text), idx + len(needle) + window // 2)
+        return text[start:end].strip()
+    return ""
+
+
+def _fallback_context_section(
+    missing: list[tuple[str, str]],
+    *source_texts: str,
+    budget: int = FALLBACK_CONTEXT_BUDGET,
+) -> str:
+    """Build the optional "additional source excerpts" prompt section for
+    whichever `missing` items (a list of (label, search_key) pairs) had no
+    per-item code context of their own. Returns "" (nothing added to the
+    prompt at all) when every item already has its own context, which is
+    the common case -- so most prompts never carry this section.
+    """
+    if not missing:
+        return ""
+    lines = []
+    used = 0
+    for label, needle in missing:
+        if used >= budget:
+            break
+        snippet = _search_snippet(needle, *source_texts)
+        if snippet:
+            lines.append(f"- {label}: {snippet}")
+            used += len(snippet)
+    if not lines:
+        return ""
+    return (
+        "\n=====================\n"
+        "additional source excerpts (best-effort search context for the few items above "
+        "with no code-grounded hint of their own -- NOT the full source file)\n"
+        "=====================\n\n"
+        + "\n".join(lines) + "\n"
+    )
 
 
 def _format_known_corrections(known_corrections: list[dict] | None) -> str:
@@ -182,13 +234,19 @@ def build_prompt(
     benchmark_description: str = "",
     known_corrections: list[dict] | None = None,
 ) -> str:
+    """`main_cc`/`problem_hh` are used ONLY as a fallback-search source for
+    whichever `candidates` have no cpp_hint/code_context of their own (see
+    metadata.parameters.attach_cpp_hints) -- the full text is deliberately
+    NOT embedded in the prompt itself; that's what used to dominate prompt
+    size (see ai.inference's 404/413 handling for what that caused).
+    """
+    missing = [(f"{c.section}.{c.key}", c.key) for c in candidates if not c.cpp_hint]
     return PROMPT_TEMPLATE.format(
         benchmark_description=benchmark_description or "(none found)",
         n_items=len(candidates),
         parameter_json=json.dumps([asdict(c) for c in candidates], indent=2),
         known_corrections=_format_known_corrections(known_corrections),
-        main_cc=main_cc,
-        problem_hh=problem_hh,
+        fallback_context=_fallback_context_section(missing, main_cc, problem_hh),
     )
 
 
@@ -231,18 +289,20 @@ Rules for choosing units:
   - If a metric is an absolute error/norm of a dimensional field quantity
     (e.g. "l2_error_pressure_abs"), give it that field's own SI unit (e.g.
     pascal for pressure errors), not a unitless placeholder.
-  - Use the benchmark description and surrounding main.cc/problem.hh code as
-    context for what physical quantity the metric represents.
+  - Use the benchmark description and each metric's own "context" field
+    (a snippet of the main.cc code around where it's computed/written) to
+    judge what physical quantity the metric represents.
 
-A benchmark description and the full main.cc/problem.hh source are provided
-only as background context. They will typically mention many more metrics,
-functions, and variables than the ones you were asked about.
+A benchmark description is provided as background context. You are
+deliberately NOT shown the rest of main.cc/problem.hh -- only each metric's
+own "context" snippet -- so there is nothing else to notice or infer
+metadata for.
 
 STRICT OUTPUT RULE: the "metrics" section below lists exactly the metric
 keys you must return metadata for -- one JSON object per key, nothing added
-and nothing omitted. Do not include metrics you merely noticed in main.cc,
-problem.hh, or the benchmark description; only the ones explicitly listed
-under "metrics" below.
+and nothing omitted. Do not include metrics you merely noticed in a
+context snippet or the benchmark description; only the ones explicitly
+listed under "metrics" below.
 
 Respond with a raw JSON array only: the first character of your response must
 be '[' and the last character must be ']'. Do not wrap the JSON in markdown
@@ -274,21 +334,7 @@ independently from its own code context)
 =====================
 
 {known_corrections}
-
-=====================
-main.cc (background context only -- do not infer metadata for anything here
-that isn't also listed under metrics above)
-=====================
-
-{main_cc}
-
-=====================
-problem.hh (background context only -- do not infer metadata for anything
-here that isn't also listed under metrics above)
-=====================
-
-{problem_hh}
-
+{fallback_context}
 Infer semantic metadata (with SI units) for every metric listed under
 metrics above -- exactly {n_items} item(s), no more, no less.
 
@@ -330,13 +376,19 @@ def build_metric_prompt(
     benchmark_description: str = "",
     known_corrections: list[dict] | None = None,
 ) -> str:
+    """`main_cc`/`problem_hh` are used ONLY as a fallback-search source for
+    whichever `candidates` somehow have no `context` of their own (in
+    practice this is essentially never -- metadata.metrics.discover_metrics()
+    always fills `context` for every candidate it creates) -- see
+    build_prompt()'s docstring for why the full text isn't embedded outright.
+    """
+    missing = [(c.key, c.key) for c in candidates if not c.context]
     return METRIC_PROMPT_TEMPLATE.format(
         benchmark_description=benchmark_description or "(none found)",
         n_items=len(candidates),
         metric_json=json.dumps([asdict(c) for c in candidates], indent=2),
         known_corrections=_format_known_metric_corrections(known_corrections),
-        main_cc=main_cc,
-        problem_hh=problem_hh,
+        fallback_context=_fallback_context_section(missing, main_cc, problem_hh),
     )
 
 
