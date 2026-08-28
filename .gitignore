@@ -5,10 +5,12 @@
 # Generated build artifacts (benchmark.jsonld + Snakefile zip from
 # describe_benchmark.py) -- these are outputs of the pipeline, not source.
 outputs/
+
 # If a semantic-benchmark checkout is cloned alongside this repo for
 # verify_description.py's --semantic-benchmark-src auto-detection (see its
 # --help), it's an external dependency, not part of this project.
 /semantic-benchmark/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -17,16 +19,21 @@ __pycache__/
 .eggs/
 build/
 dist/
+
 # Virtual environments
 .venv/
 venv/
 env/
 ENV/
+
 # Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+
 # OS
 .DS_Store
 Thumbs.db
+
+.benchmantic_corrections.json

@@ -8,15 +8,21 @@ ai.validation
 Validates and repairs LLM-returned parameter/metric JSON: required-field
 checks, requested-vs-returned reconciliation, index bounds-checking, a
 safety net that catches (and fixes) the LLM confusing a QUDT unit with a
-QUDT quantityKind, and stripping of a recurring hedging clause (e.g. "...,
-but the exact meaning is unclear without more context.") from "explanation"
-before it's cached or copied into benchmark.jsonld's "description" fields.
+QUDT quantityKind, a fallback that backfills a missing quantityKind from
+its unit alone (querying the unit's own QUDT vocabulary entry first, then
+a best-effort live lookup against the SI Digital Framework's units page
+-- see _backfill_missing_quantitykind()), and stripping of a recurring
+hedging clause (e.g. "..., but the exact meaning is unclear without more
+context.") from "explanation" before it's cached or copied into
+benchmark.jsonld's "description" fields.
 """
 
 from __future__ import annotations
 
 import re
 import sys
+import urllib.error
+import urllib.request
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -60,6 +66,222 @@ QUANTITYKIND_DEFAULT_UNIT: dict[str, str] = {
 #: Matches a QUDT quantitykind URI/CURIE, e.g.
 #: "http://qudt.org/vocab/quantitykind/Length" or "quantitykind:Length".
 QUANTITYKIND_URI_PATTERN = re.compile(r"quantitykind[/:]([A-Za-z0-9_]+)", re.IGNORECASE)
+
+
+# =============================================================================
+# quantityKind backfill from "unit" alone (QUDT vocabulary + SI Digital
+# Framework reference)
+# =============================================================================
+#
+# Sometimes the model returns a perfectly good "unit" but leaves
+# "quantityKind" null. Two live fallback layers try to fill it in from the
+# unit alone, in order -- see _backfill_missing_quantitykind() below:
+#   1. _fetch_quantitykind_from_qudt(), which asks the unit's own QUDT
+#      vocabulary entry (e.g. http://qudt.org/vocab/unit/PA) for its
+#      qudt:hasQuantityKind relationship -- QUDT is the same vocabulary
+#      this pipeline's units/quantityKind URIs already come from (see
+#      QUANTITYKIND_URI_PATTERN), so this is the authoritative source,
+#      not a guess, and it covers every unit QUDT knows about rather than
+#      just a hand-picked subset.
+#   2. _fetch_quantitykind_from_si_framework(), a best-effort lookup
+#      against SI_UNITS_REFERENCE_URL, only attempted if the QUDT lookup
+#      didn't turn up an answer (unit not found, network hiccup, etc.).
+# Both are genuinely best-effort: this environment's own network access to
+# either qudt.org or si-digital-framework.org returned no connection at
+# all when this was written (and a real browser fetch of the SI page got a
+# 403 even with a UA header set), so both functions are written
+# defensively -- ANY failure (no network, timeout, a 403/blocked response,
+# unexpected response structure, no match found) returns None silently
+# rather than raising. Worst case is exactly today's behavior
+# (quantityKind stays null); this only ever adds a chance to fill it in,
+# never a new way for a run to fail. Verify their output before trusting
+# it blindly -- neither was tested against the live services' actual
+# responses.
+
+QUDT_UNIT_BASE_URI = "http://qudt.org/vocab/unit/"
+SI_UNITS_REFERENCE_URL = "https://si-digital-framework.org/SI/units?lang=en"
+
+#: How long to wait for the QUDT vocabulary server before giving up --
+#: kept short since this is a best-effort fallback for one missing field,
+#: not something the pipeline should hang on.
+_QUDT_TIMEOUT_SECONDS = 5.0
+
+
+def _fetch_quantitykind_from_qudt(unit_value: str) -> str | None:
+    """Best-effort live lookup: ask QUDT's own vocabulary entry for
+    `unit_value` (e.g. "unit:PA" -> http://qudt.org/vocab/unit/PA) what
+    quantity kind it belongs to, via content negotiation. QUDT unit
+    resources publish their qudt:hasQuantityKind relationship as RDF, so
+    a GET on the unit's URI (asking for a machine-readable format) is
+    enough -- no separate SPARQL query needed.
+
+    Deliberately loose about the response body's exact structure (RDF/JSON,
+    JSON-LD, or even Turtle/RDF-XML would all work here) rather than a
+    strict parse: it just decodes the body as text and regex-searches it
+    for a quantitykind URI/CURIE whose local name is one this pipeline
+    already recognizes (QUANTITYKIND_DEFAULT_UNIT's keys) -- the same
+    "found something plausible" approach as the SI Digital Framework
+    fallback below, since this codebase can't verify the exact response
+    format against a live connection. Every failure mode (network
+    unreachable, blocked, timeout, no recognizable match) returns None
+    rather than raising -- see this section's module-level comment.
+    """
+    unit_symbol = unit_value.removeprefix("unit:")
+    if not unit_symbol:
+        return None
+    url = QUDT_UNIT_BASE_URI + unit_symbol
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; benchmantic/1.0; +metadata inference fallback)",
+                "Accept": "application/rdf+json, application/ld+json;q=0.9, text/turtle;q=0.8, */*;q=0.5",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=_QUDT_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+
+    for match in QUANTITYKIND_URI_PATTERN.finditer(body):
+        quantity_name = match.group(1)
+        if quantity_name in QUANTITYKIND_DEFAULT_UNIT:
+            return quantity_name
+    return None
+
+
+#: For the SI Digital Framework live-fetch fallback: quantityKind name -> the human-readable
+#: phrase to look for near the unit's symbol on SI_UNITS_REFERENCE_URL's
+#: page (e.g. the page lists "pascal" next to "pressure"). Only the
+#: quantity kinds this pipeline recognizes elsewhere (QUANTITYKIND_DEFAULT_UNIT's
+#: keys) are worth searching for -- returning something outside that set
+#: wouldn't be usable by _fix_unit_quantitykind_confusion() or the rest of
+#: this pipeline anyway.
+_QUANTITYKIND_SEARCH_PHRASES: dict[str, str] = {
+    "Length": "length",
+    "Mass": "mass",
+    "Time": "time",
+    "ElectricCurrent": "electric current",
+    "ThermodynamicTemperature": "thermodynamic temperature",
+    "AmountOfSubstance": "amount of substance",
+    "LuminousIntensity": "luminous intensity",
+    "Area": "area",
+    "Volume": "volume",
+    "Angle": "plane angle",
+    "SolidAngle": "solid angle",
+    "AngularVelocity": "angular velocity",
+    "AngularAcceleration": "angular acceleration",
+    "Velocity": "velocity",
+    "Acceleration": "acceleration",
+    "MassDensity": "density",
+    "Frequency": "frequency",
+    "Force": "force",
+    "Pressure": "pressure",
+    "DynamicViscosity": "viscosity",
+    "KinematicViscosity": "viscosity",
+    "Energy": "energy",
+    "Power": "power",
+}
+
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+
+#: How long to wait for SI_UNITS_REFERENCE_URL before giving up -- kept
+#: short since this is a best-effort fallback for one missing field, not
+#: something the pipeline should hang on.
+_SI_FRAMEWORK_TIMEOUT_SECONDS = 5.0
+
+
+def _fetch_quantitykind_from_si_framework(unit_value: str) -> str | None:
+    """Best-effort live fallback: look for `unit_value`'s quantity on
+    SI_UNITS_REFERENCE_URL when UNIT_TO_QUANTITYKIND above doesn't cover
+    it. See this section's module-level comment for why this is written
+    defensively -- every failure mode here (network unreachable, blocked/
+    403, timeout, unexpected HTML, no match) returns None rather than
+    raising, so a run can never fail because of this function.
+
+    Loosely: strips HTML tags to plain text, finds every place the unit's
+    symbol (e.g. "Pa" from "unit:PA") appears, and checks a window of text
+    around each occurrence for a recognizable quantity-name phrase (see
+    _QUANTITYKIND_SEARCH_PHRASES). Deliberately loose rather than a precise
+    table-cell parse, since this page's exact markup isn't something this
+    codebase controls -- "found something plausible nearby" is the goal,
+    not exact extraction. Returns the first quantity kind whose phrase
+    turns up near ANY occurrence of the symbol; ambiguous/no matches
+    return None, same as not having looked at all.
+    """
+    unit_symbol = unit_value.removeprefix("unit:")
+    if not unit_symbol:
+        return None
+    try:
+        request = urllib.request.Request(
+            SI_UNITS_REFERENCE_URL,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; benchmantic/1.0; +metadata inference fallback)"},
+        )
+        with urllib.request.urlopen(request, timeout=_SI_FRAMEWORK_TIMEOUT_SECONDS) as response:
+            html = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+
+    text = _HTML_TAG_PATTERN.sub(" ", html)
+    text = re.sub(r"\s+", " ", text).lower()
+    symbol_lower = unit_symbol.lower()
+
+    for match in re.finditer(re.escape(symbol_lower), text):
+        window = text[max(0, match.start() - 150): match.end() + 150]
+        for quantity_kind, phrase in _QUANTITYKIND_SEARCH_PHRASES.items():
+            if phrase in window:
+                return quantity_kind
+    return None
+
+
+def _lookup_quantitykind_for_unit(unit_value: str | None) -> str | None:
+    """QUDT's own vocabulary entry for the unit first (authoritative,
+    covers anything QUDT knows about), then a best-effort live
+    SI_UNITS_REFERENCE_URL lookup if that didn't resolve it. Both layers
+    need network access -- this backfill is skipped entirely (item just
+    keeps its missing quantityKind) if neither is reachable. Returns None
+    if neither layer finds anything.
+    """
+    if not unit_value:
+        return None
+    return _fetch_quantitykind_from_qudt(unit_value) or _fetch_quantitykind_from_si_framework(unit_value)
+
+
+def _backfill_missing_quantitykind(item: dict, label: str = "") -> None:
+    """If the model returned a "unit" but left "quantityKind" null, try to
+    fill it in via _lookup_quantitykind_for_unit() (see above). Mutates
+    `item` in place; no-op if quantityKind is already set, there's no unit
+    to look up, or the item isn't a numerical quantity in the first place
+    (a schema:String field's "unit:UNITLESS" -- e.g. a boolean flag or a
+    name field -- has no physical quantity kind at all; only numeric
+    datatypes are worth backfilling here).
+
+    Marked "_needs_verification" rather than silently indistinguishable
+    from the model's own answer -- this is OUR inference from the unit
+    alone (via a reference lookup), not something the model itself
+    assessed, same rationale as ai.validation's other structural backfills
+    (see _backfill_missing_ini()'s docstring). Does NOT touch "confidence"
+    for the same reason that backfill doesn't.
+    """
+    if item.get("quantityKind") or not item.get("unit"):
+        return
+    if item.get("datatype") == "schema:String":
+        return
+    quantity_name = _lookup_quantitykind_for_unit(item["unit"])
+    if not quantity_name:
+        return
+    item["quantityKind"] = f"http://qudt.org/vocab/quantitykind/{quantity_name}"
+    item["_needs_verification"] = (
+        f"quantityKind was missing from the model's response -- filled in from unit "
+        f"{item['unit']!r} ({quantity_name}) via a live lookup ({QUDT_UNIT_BASE_URI}{item['unit'].removeprefix('unit:')} "
+        f"or, as a fallback, {SI_UNITS_REFERENCE_URL}); please verify."
+    )
+    print(
+        f"warning: {label + ' ' if label else ''}'{item.get('semantic_name', item.get('key', '?'))}' "
+        f"was missing quantityKind -- filled in as {quantity_name!r} from its unit ({item['unit']!r}), "
+        f"flagged for review.",
+        file=sys.stderr,
+    )
 
 #: Matches a recurring LLM hedging clause tacked onto an otherwise-useful
 #: "explanation" -- e.g. "..., but the exact meaning is unclear without
@@ -248,6 +470,7 @@ def validate_metadata(
         item.setdefault("explanation", "")
         item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="parameter")
+        _backfill_missing_quantitykind(item, label="parameter")
         validated.append(item)
 
     if candidates is not None:
@@ -351,6 +574,7 @@ def validate_metric_metadata(
         item.setdefault("explanation", "")
         item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="metric")
+        _backfill_missing_quantitykind(item, label="metric")
         validated.append(item)
 
     if candidates is not None:
