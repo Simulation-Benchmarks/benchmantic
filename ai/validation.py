@@ -6,9 +6,11 @@
 ai.validation
 
 Validates and repairs LLM-returned parameter/metric JSON: required-field
-checks, requested-vs-returned reconciliation, index bounds-checking, and a
+checks, requested-vs-returned reconciliation, index bounds-checking, a
 safety net that catches (and fixes) the LLM confusing a QUDT unit with a
-QUDT quantityKind.
+QUDT quantityKind, and stripping of a recurring hedging clause (e.g. "...,
+but the exact meaning is unclear without more context.") from "explanation"
+before it's cached or copied into benchmark.jsonld's "description" fields.
 """
 
 from __future__ import annotations
@@ -58,6 +60,40 @@ QUANTITYKIND_DEFAULT_UNIT: dict[str, str] = {
 #: Matches a QUDT quantitykind URI/CURIE, e.g.
 #: "http://qudt.org/vocab/quantitykind/Length" or "quantitykind:Length".
 QUANTITYKIND_URI_PATTERN = re.compile(r"quantitykind[/:]([A-Za-z0-9_]+)", re.IGNORECASE)
+
+#: Matches a recurring LLM hedging clause tacked onto an otherwise-useful
+#: "explanation" -- e.g. "..., but the exact meaning is unclear without
+#: more context." This is filler: it doesn't add any information the
+#: confidence score doesn't already convey, and it reads badly once
+#: "explanation" is copied verbatim into benchmark.jsonld as a parameter's/
+#: metric's "description" (see metadata.parameters.build_parameter_fields()
+#: and metadata.metrics.build_metric_fields()). Deliberately broad enough to
+#: catch "but"/"though"/"although"/"however" + "exact"/"precise" meaning
+#: is unclear + "more"/"further"/"additional" context/information, not just
+#: the one literal wording -- but still anchored on "meaning is unclear" so
+#: it can't eat an unrelated sentence that happens to contain "but".
+_HEDGE_CLAUSE_PATTERN = re.compile(
+    r"\s*[,;]?\s*\b(?:but|though|although|however)\b[^.!?]*?"
+    r"\b(?:exact|precise)\s+meaning\s+is\s+unclear\b"
+    r"[^.!?]*?\b(?:context|information)\b[^.!?]*[.!?]?",
+    re.IGNORECASE,
+)
+
+
+def _strip_hedging(text: str | None) -> str:
+    """Remove _HEDGE_CLAUSE_PATTERN matches from `text` and tidy up the
+    leftover punctuation/whitespace (e.g. a dangling comma where the clause
+    used to start, or a missing final period). Safe to call on empty/None
+    input.
+    """
+    if not text:
+        return text or ""
+    cleaned = _HEDGE_CLAUSE_PATTERN.sub("", text)
+    cleaned = re.sub(r"\s+([.,;!?])", r"\1", cleaned)  # "grid ," -> "grid,"
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    if cleaned and cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
 
 
 def _fix_unit_quantitykind_confusion(item: dict, label: str = "") -> None:
@@ -154,9 +190,9 @@ def _backfill_missing_ini(data: list, candidates: list[ParameterCandidate] | Non
     is the model's actual assessment of the physical inference (unit,
     quantity kind, semantic name), which the backfill has no bearing on and
     shouldn't overwrite or hide. Instead, backfilled items are marked with
-    "_needs_verification" -- a separate signal review.py's review gate
+    "_needs_verification" -- a separate signal ai.review's review gate
     treats the same way as low confidence (it forces a look before a plain
-    accept), without claiming the model itself was unsure. See review.py's
+    accept), without claiming the model itself was unsure. See ai.review's
     _flagged_indices().
     """
     if not candidates or len(data) != len(candidates):
@@ -210,6 +246,7 @@ def validate_metadata(
         item.setdefault("confidence", 1.0)
         item.setdefault("quantityKind", None)
         item.setdefault("explanation", "")
+        item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="parameter")
         validated.append(item)
 
@@ -312,6 +349,7 @@ def validate_metric_metadata(
         item.setdefault("confidence", 1.0)
         item.setdefault("quantityKind", None)
         item.setdefault("explanation", "")
+        item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="metric")
         validated.append(item)
 

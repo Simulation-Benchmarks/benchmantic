@@ -10,16 +10,27 @@ Renders a metadata.builder-produced benchmark.jsonld RO-Crate graph as
 human-readable Markdown tables for manual verification: benchmark/manifest
 info, pinned dependency versions, input parameters, and output metrics.
 
+Author/publisher/dependency info lives in a separate sidecar file --
+"<benchmark-name>_dataset.jsonld", written alongside the benchmark file by
+describe_benchmark.py (see metadata.builder.GraphBuilder.build_dataset_graph())
+-- rather than in the benchmark file itself. This script auto-discovers
+that sibling file next to the one you pass in (or accepts --dataset-jsonld
+to point at it explicitly) and merges it back in for display, so the
+rendered tables look the same as when everything lived in one file. If no
+sidecar is found, those rows/sections are just omitted -- not an error.
+
 Usage
 -----
-    python3 show_description.py benchmark.jsonld
-    python3 show_description.py benchmark.jsonld --output review.md
-    python3 show_description.py benchmark.jsonld --no-save
+    python3 show_description.py rotating_cylinders_benchmark.jsonld
+    python3 show_description.py rotating_cylinders_benchmark.jsonld --output review.md
+    python3 show_description.py rotating_cylinders_benchmark.jsonld --no-save
+    python3 show_description.py rotating_cylinders_benchmark.jsonld \\
+        --dataset-jsonld rotating_cylinders_dataset.jsonld
 
 Always prints to stdout. Also always saves a copy as review.md right next
-to the input file by default -- e.g. outputs/dumux/benchmark.jsonld ->
-outputs/dumux/review.md -- so the rendered table lives alongside
-benchmark.jsonld and the Snakefile zip, not just in your terminal history.
+to the input file by default -- e.g. outputs/dumux/rotating_cylinders_benchmark.jsonld
+-> outputs/dumux/review.md -- so the rendered table lives alongside the
+benchmark file and the Snakefile, not just in your terminal history.
 Override the saved filename/location with --output, or skip saving
 entirely with --no-save.
 """
@@ -76,14 +87,23 @@ def _print_table(rows: list[list[str]], headers: list[str], out: list[str]) -> N
 # Section builders
 # ============================================================
 
-def build_manifest_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> None:
+def build_manifest_section(
+    by_id: dict[str, dict[str, Any]],
+    out: list[str],
+    dataset_by_id: dict[str, dict[str, Any]] | None = None,
+) -> None:
     root = by_id.get("./")
     benchmark = find_first(by_id, "m4i:Benchmark")
     software = by_id.get("local:software")
     license_node = by_id.get(_id(root.get("license"))) if root else None
-    author = by_id.get(_id(root.get("author"))) if root else None
-    publisher = by_id.get(_id(root.get("publisher"))) if root else None
     publication = by_id.get(_id(benchmark.get("describedAsDocumentedBy"))) if benchmark else None
+
+    # Author/publisher live in the sibling "<benchmark-name>_dataset.jsonld"
+    # file's own root entity now, not this one -- see this module's
+    # docstring and GraphBuilder.build_dataset_graph().
+    dataset_root = (dataset_by_id or {}).get("./")
+    author = dataset_by_id.get(_id(dataset_root.get("author"))) if dataset_root and dataset_by_id else None
+    publisher = dataset_by_id.get(_id(dataset_root.get("publisher"))) if dataset_root and dataset_by_id else None
 
     out.append("## Benchmark / Manifest metadata\n")
     rows = [
@@ -110,9 +130,16 @@ def build_manifest_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> 
     _print_table(rows, ["Field", "Value"], out)
 
 
-def build_dependencies_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> None:
-    software = by_id.get("local:software")
-    deps: list[str] = (software or {}).get("schema:softwareRequirements", [])
+def build_dependencies_section(
+    by_id: dict[str, dict[str, Any]],
+    out: list[str],
+    dataset_by_id: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    # Dependencies (schema:softwareRequirements) live on the sibling
+    # dataset file's own root entity now, not on this file's "local:software"
+    # node -- see build_manifest_section()'s comment above.
+    dataset_root = (dataset_by_id or {}).get("./")
+    deps: list[str] = (dataset_root or {}).get("schema:softwareRequirements", [])
     if not deps:
         return
 
@@ -210,12 +237,41 @@ def build_metrics_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> N
 # Entry point
 # ============================================================
 
+def _find_sibling_dataset(metadata_jsonld: Path) -> Path | None:
+    """Best-effort discovery of the sibling "<benchmark-name>_dataset.jsonld"
+    file describe_benchmark.py writes next to the benchmark file (see
+    metadata.builder.GraphBuilder.build_dataset_graph()) -- holds author/
+    publisher/dependency info that's no longer part of the benchmark file
+    itself. Tried in order:
+      1. "<stem without a trailing '_benchmark'>_dataset.jsonld" next to it
+         (the normal case -- matches describe_benchmark.py's naming).
+      2. The single "*_dataset.jsonld" file in the same directory, if
+         exactly one exists (covers a renamed/--benchmark-filename input).
+    Returns None (not an error) if nothing matches -- the affected
+    rows/sections are just omitted, same as before this sidecar file
+    existed. Use --dataset-jsonld to point at one explicitly instead of
+    relying on this discovery.
+    """
+    stem = metadata_jsonld.stem
+    if stem.endswith("_benchmark"):
+        candidate = metadata_jsonld.with_name(stem[: -len("_benchmark")] + "_dataset.jsonld")
+        if candidate.exists():
+            return candidate
+    matches = sorted(metadata_jsonld.parent.glob("*_dataset.jsonld"))
+    return matches[0] if len(matches) == 1 else None
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("metadata_jsonld", type=Path, help="Path to a describe_benchmark.py output (benchmark.jsonld).")
+    ap.add_argument("metadata_jsonld", type=Path,
+                     help="Path to a describe_benchmark.py output (the '<benchmark-name>_benchmark.jsonld' file).")
+    ap.add_argument("--dataset-jsonld", type=Path, default=None,
+                     help="Path to the sibling '<benchmark-name>_dataset.jsonld' file (author/publisher/"
+                          "dependencies) written alongside metadata_jsonld. Default: auto-discovered next to "
+                          "metadata_jsonld; if none is found, those rows/sections are just omitted.")
     ap.add_argument("--output", type=Path, default=None,
                      help="Save the Markdown tables to this file instead of the default "
-                          "<input directory>/review.md (e.g. outputs/dumux/benchmark.jsonld -> "
+                          "<input directory>/review.md (e.g. outputs/dumux/rotating_cylinders_benchmark.jsonld -> "
                           "outputs/dumux/review.md).")
     ap.add_argument("--no-save", action="store_true",
                      help="Only print to stdout -- don't save a review.md (or --output) file at all.")
@@ -228,9 +284,14 @@ def run(args: argparse.Namespace) -> None:
 
     by_id = load_graph(args.metadata_jsonld)
 
+    dataset_path = args.dataset_jsonld or _find_sibling_dataset(args.metadata_jsonld)
+    if args.dataset_jsonld and not args.dataset_jsonld.exists():
+        sys.exit(f"Error: {args.dataset_jsonld} does not exist")
+    dataset_by_id = load_graph(dataset_path) if dataset_path else None
+
     out: list[str] = []
-    build_manifest_section(by_id, out)
-    build_dependencies_section(by_id, out)
+    build_manifest_section(by_id, out, dataset_by_id)
+    build_dependencies_section(by_id, out, dataset_by_id)
     build_parameters_section(by_id, out)
     build_metrics_section(by_id, out)
 

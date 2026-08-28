@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-review.py
+ai.review
 
 Interactive CLI review/edit step for AI-inferred parameter and metric
 metadata, run inside metadata.builder.build() between "Infer" and "Build":
@@ -202,8 +202,10 @@ def interactive_review(
     see ai.validation) show a '!'/'?' marker in the table so they're easy to
     spot, but pressing Enter always accepts the table as shown, flagged rows
     included -- there's no separate "type 'accept' to confirm" gate to get
-    through. If you want to fix something, type its row number first; Enter
-    only when you're done looking.
+    through, and no separate "reprint" command either: the table is simply
+    reprinted every time you edit a row and loop back around. If you want
+    to fix something, type its row number first; Enter only when you're
+    done looking.
 
     Returns (final_items, correction_records): final_items is the same list
     object, mutated in place (any transient "_edited"/"_needs_verification"
@@ -228,14 +230,11 @@ def interactive_review(
 
         try:
             choice = input(
-                "\nEnter a row number to edit, 'show' to reprint the table, "
-                "or press Enter to accept and continue: "
+                "\nEnter a row number to edit, or press Enter to accept and continue: "
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             choice = ""
 
-        if choice == "show":
-            continue
         if choice != "":
             if not choice.isdigit() or not (0 <= int(choice) < len(items)):
                 print("Not a valid row number.")

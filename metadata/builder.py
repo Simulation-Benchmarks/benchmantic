@@ -10,6 +10,15 @@ the JSON-LD @context, the manifest (license/software/publisher/author
 derivation), GraphBuilder (assembles the actual @graph), RO-Crate 1.1
 conformance validation, and the CLI (parse_args/build) that ties it all
 together. This is the module describe_benchmark.py calls directly.
+
+build() actually writes two documents, not one: the benchmark file itself
+(parameters, metrics, processing steps, RO-Crate root -- see
+GraphBuilder.add_rocrate_root()) at `args.output`, plus a sidecar dataset
+document (author, publisher, software dependencies -- see
+GraphBuilder.build_dataset_graph()) at `args.output`'s ".dataset.jsonld"
+sibling. describe_benchmark.py renames both into their final
+"<benchmark-name>_benchmark.jsonld" / "<benchmark-name>_dataset.jsonld"
+names once the benchmark's own name is known.
 """
 
 from __future__ import annotations
@@ -28,10 +37,10 @@ from ai.cache import (
 )
 from ai import corrections as corrections_store
 from ai.inference import (
-    DEFAULT_BATCH_SIZE, DEFAULT_PROVIDER, PROVIDER_CONFIG,
+    DEFAULT_BATCH_SIZE, DEFAULT_PROVIDER, DEFAULT_TPM_BUDGET, PROVIDER_CONFIG,
     infer_metric_metadata, infer_parameter_metadata,
 )
-import review
+from ai import review
 from metadata.metrics import (
     DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metric_fields,
     discover_metrics_from_maincc,
@@ -50,7 +59,7 @@ from metadata.repository import (
 )
 from metadata.software import detect_software_label
 from utils import read_text, slugify
-import repo_source
+from metadata import repo_source
 
 
 DEFAULT_CONTEXT = {
@@ -497,11 +506,10 @@ class GraphBuilder:
         })
         self.graph.append({
             "@id": "local:software", "@type": "tool", "label": m["software_label"],
-            **({
-                "schema:softwareRequirements": [
-                    _format_dependency(d) for d in m["dependencies"]
-                ]
-            } if m.get("dependencies") else {}),
+            # NOTE: dependencies (schema:softwareRequirements) deliberately
+            # NOT attached here -- see build_dataset_graph(). They live in
+            # the separate {benchmark_name}_dataset.jsonld file alongside
+            # author/publisher, not in the benchmark file itself.
         })
         self.graph.append({
             "@id": "local:parameter_file_object", "@type": "cr:FileObject",
@@ -541,6 +549,16 @@ class GraphBuilder:
         https://www.researchobject.org/ro-crate/1.1/root-data-entity.html.
         Call this last, after add_benchmark_node(), so it can reference the
         benchmark and file-object entities that already exist in the graph.
+
+        Deliberately does NOT attach author/publisher here -- those (plus
+        software dependencies) live in a separate document built by
+        build_dataset_graph() instead (written to its own
+        {benchmark_name}_dataset.jsonld file by describe_benchmark.py), so
+        the benchmark file itself stays focused on parameters/metrics/
+        processing steps. This doesn't affect RO-Crate 1.1 conformance --
+        the profile's root-entity requirements are name/description/
+        datePublished/license/hasPart; author and publisher are RECOMMENDED,
+        not REQUIRED.
         """
         m = self.manifest
         root_id = "./"
@@ -562,15 +580,57 @@ class GraphBuilder:
         if m.get("repo_url"):
             root_entity["codeRepository"] = m["repo_url"]
 
-        def _guess_note(name_is_guess: bool, has_url: bool) -> str | None:
-            if name_is_guess:
-                return (
-                    "Automatically inferred from the repository's hosting domain "
-                    "(no SPDX copyright header was found in source) -- please verify."
-                )
-            if has_url:
-                return "URL automatically inferred from the repository's hosting domain -- please verify."
-            return None
+        self.graph.insert(0, root_entity)
+        self.graph.insert(0, {
+            "@id": "ro-crate-metadata.json",
+            "@type": "schema:CreativeWork",
+            "conformsTo": {"@id": "https://w3id.org/ro/crate/1.1"},
+            "about": {"@id": root_id},
+        })
+        self.graph.append({
+            "@id": license_id,
+            "@type": "schema:CreativeWork",
+            "name": m.get("license_label") or license_id,
+        })
+
+    @staticmethod
+    def _dataset_guess_note(name_is_guess: bool, has_url: bool) -> str | None:
+        if name_is_guess:
+            return (
+                "Automatically inferred from the repository's hosting domain "
+                "(no SPDX copyright header was found in source) -- please verify."
+            )
+        if has_url:
+            return "URL automatically inferred from the repository's hosting domain -- please verify."
+        return None
+
+    def build_dataset_graph(self, benchmark_filename: str | None = None) -> list[dict[str, Any]]:
+        """Build a standalone {"@graph": [...]} node list -- NOT merged into
+        self.graph -- covering the dataset-level provenance that used to
+        live on the benchmark file's own root entity: author, publisher,
+        and software dependencies (schema:softwareRequirements). Written to
+        its own {benchmark_name}_dataset.jsonld file, alongside (but
+        separate from) the benchmark file itself, by describe_benchmark.py.
+
+        `benchmark_filename`, if given, is recorded as a plain relative
+        "schema:isPartOf" link back to the sibling benchmark file, since the
+        two files describe the same benchmark but live in the same output
+        directory rather than one crate.
+
+        Mirrors add_rocrate_root()'s old author/publisher assembly logic
+        (moved here, not duplicated -- see that method's docstring).
+        """
+        m = self.manifest
+        graph: list[dict[str, Any]] = []
+
+        root_entity: dict[str, Any] = {
+            "@id": "./",
+            "@type": "schema:Dataset",
+            "name": m["label"],
+            "description": m.get("root_description") or self.benchmark_description or m["label"],
+        }
+        if benchmark_filename:
+            root_entity["schema:isPartOf"] = {"@id": benchmark_filename}
 
         publisher_id = None
         if m.get("publisher_name"):
@@ -583,10 +643,10 @@ class GraphBuilder:
             }
             if m.get("publisher_url"):
                 publisher_node["schema:url"] = m["publisher_url"]
-            note = _guess_note(m.get("publisher_name_is_guess", False), bool(m.get("publisher_url")))
+            note = self._dataset_guess_note(m.get("publisher_name_is_guess", False), bool(m.get("publisher_url")))
             if note:
                 publisher_node["schema:disambiguatingDescription"] = note
-            self.graph.append(publisher_node)
+            graph.append(publisher_node)
 
         authors = m.get("authors") or []
         if authors:
@@ -609,7 +669,7 @@ class GraphBuilder:
                         "Automatically inferred from the repository's hosting domain "
                         "(no SPDX copyright header or AUTHORS file was found) -- please verify."
                     )
-                self.graph.append(author_node)
+                graph.append(author_node)
                 author_refs.append({"@id": author_id})
 
             # Long AUTHORS/CONTRIBUTORS files are truncated (see
@@ -617,7 +677,7 @@ class GraphBuilder:
             # as one extra node rather than silently dropping them.
             if source == "authors_file" and m.get("authors_omitted"):
                 more_id = "local:author_additional_contributors"
-                self.graph.append({
+                graph.append({
                     "@id": more_id,
                     "@type": "schema:Organization",
                     "name": f"{m['authors_omitted']} additional contributor(s)",
@@ -628,18 +688,13 @@ class GraphBuilder:
 
             root_entity["author"] = author_refs if len(author_refs) > 1 else author_refs[0]
 
-        self.graph.insert(0, root_entity)
-        self.graph.insert(0, {
-            "@id": "ro-crate-metadata.json",
-            "@type": "schema:CreativeWork",
-            "conformsTo": {"@id": "https://w3id.org/ro/crate/1.1"},
-            "about": {"@id": root_id},
-        })
-        self.graph.append({
-            "@id": license_id,
-            "@type": "schema:CreativeWork",
-            "name": m.get("license_label") or license_id,
-        })
+        if m.get("dependencies"):
+            root_entity["schema:softwareRequirements"] = [
+                _format_dependency(d) for d in m["dependencies"]
+            ]
+
+        graph.insert(0, root_entity)
+        return graph
 
 
 # =============================================================================
@@ -804,8 +859,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--inference-batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                      help="Max parameters/metrics sent to the LLM in a single inference request "
                           f"(default: {DEFAULT_BATCH_SIZE}). A benchmark with more not-yet-cached items than "
-                          "this is split into multiple independent requests instead of one large one -- "
-                          "lower this if you're still hitting a provider's per-request token/payload limit.")
+                          "this is split into multiple independent requests instead of one large one. Each "
+                          "resulting chunk may be split further still if its own estimated token cost exceeds "
+                          "--inference-tpm-budget -- see that flag.")
+    ap.add_argument("--inference-tpm-budget", type=int, default=DEFAULT_TPM_BUDGET,
+                     help="Target tokens-per-minute budget for the inference step "
+                          f"(default: {DEFAULT_TPM_BUDGET:,}). Used two ways: (1) any --inference-batch-size "
+                          "chunk whose estimated cost (prompt + expected completion) exceeds this is split "
+                          "further, regardless of item count; (2) every request made during this run reserves "
+                          "its estimated cost against a shared budget before sending, so a burst of "
+                          "individually-small requests can't collectively exceed it either. Set this well "
+                          "BELOW your account's actual TPM cap, not equal to it -- token estimation is a "
+                          "heuristic (see ai.inference's CHARS_PER_TOKEN_ESTIMATE), and other activity on the "
+                          "same API key shares the same rolling window. E.g. on a 12,000 TPM account, try "
+                          "8,000-9,000, not 12,000.")
     ap.add_argument("--skip-validation", action="store_true",
                      help="Skip the automatic RO-Crate 1.1 conformance check that normally runs "
                           "after writing the output (via the 'rocrate_validator' package -- "
@@ -821,7 +888,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def build(args: argparse.Namespace) -> None:
     """Resolve `module_dir` (a local path, or a git URL -- see
-    repo_source.py), run the actual build (_build_impl()), and clean up a
+    metadata/repo_source.py), run the actual build (_build_impl()), and clean up a
     throwaway clone afterward regardless of whether the build succeeded or
     raised. getattr() with defaults on the resolve_source() call so this
     also works when `args` comes from a caller (e.g. describe_benchmark.py)
@@ -1059,7 +1126,7 @@ def _build_impl(args: argparse.Namespace) -> None:
         # Prior human corrections to similarly named/typed parameters (from
         # ANY module reviewed with this checkout before) -- included as
         # guidance in the prompt so the model doesn't repeat a mistake a
-        # human already fixed once. See ai.corrections / review.py.
+        # human already fixed once. See ai.corrections / ai.review.
         known_corrections = corrections_store.relevant_corrections_for(
             [c.key for c in missing_candidates], "parameter",
         )
@@ -1074,6 +1141,7 @@ def _build_impl(args: argparse.Namespace) -> None:
                 verbose=args.verbose,
                 known_corrections=known_corrections,
                 batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
+                tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1199,6 +1267,7 @@ def _build_impl(args: argparse.Namespace) -> None:
                 verbose=args.verbose,
                 known_corrections=known_metric_corrections,
                 batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
+                tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1276,6 +1345,20 @@ def _build_impl(args: argparse.Namespace) -> None:
     doc = {"@context": DEFAULT_CONTEXT, "@graph": builder.graph}
     args.output.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     print(f"Wrote {args.output} ({len(builder.graph)} graph nodes, {len(cases)} cases)")
+
+    # Dataset-level provenance (author, publisher, software dependencies) --
+    # deliberately a *separate* document from the benchmark file above (see
+    # GraphBuilder.build_dataset_graph()'s docstring). Written here to a
+    # staged sidecar path next to args.output; describe_benchmark.py renames
+    # it to its final "<benchmark-name>_dataset.jsonld" name (and fills in
+    # the "schema:isPartOf" link back to the benchmark file's *final* name,
+    # which isn't known yet at this point) when it moves both files into
+    # outputs/<software-name>/.
+    dataset_graph = builder.build_dataset_graph()
+    dataset_doc = {"@context": DEFAULT_CONTEXT, "@graph": dataset_graph}
+    dataset_staged_path = args.output.with_name(args.output.stem + ".dataset.jsonld")
+    dataset_staged_path.write_text(json.dumps(dataset_doc, indent=2), encoding="utf-8")
+    print(f"Wrote {dataset_staged_path} ({len(dataset_graph)} graph nodes)")
 
     # Non-RO-Crate build/workflow hints -- collected while scanning the repo
     # (executable name from CMakeLists.txt, module path relative to the repo

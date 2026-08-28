@@ -10,10 +10,12 @@ Runs the full local dev loop in one command:
 
     describe_benchmark  -->  show_description  -->  verify_description
 
-1. describe_benchmark generates benchmark.jsonld + the Snakefile zip into
+1. describe_benchmark generates the benchmark file, its dataset-provenance
+   sidecar, and the Snakefile (a plain file, not zipped) into
    outputs/<software-name>/.
-2. show_description renders benchmark.jsonld as Markdown tables, so you can
-   eyeball what got extracted.
+2. show_description renders the benchmark file (merged with its sibling
+   dataset file, if found -- see show_description.py) as Markdown tables,
+   so you can eyeball what got extracted.
 3. verify_description validates it against what semantic_benchmark actually
    needs (see that script for details), and this script's own exit code
    mirrors its result -- so `workflow.py ... && echo ok` behaves the way
@@ -74,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print("=== describe_benchmark ===")
     build_args = describe_benchmark.build_arg_parser().parse_args(remaining)
-    benchmark_path, zip_path = describe_benchmark.run(build_args)
+    benchmark_path, dataset_path, snakefile_path = describe_benchmark.run(build_args)
 
     if not extra_args.skip_show:
         print("\n=== show_description ===")

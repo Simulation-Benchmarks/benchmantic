@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-repo_source.py
+metadata.repo_source
 
 Lets `module_dir` (the positional argument to describe_benchmark.py /
 metadata.builder) be a GitHub, GitLab, or any git-reachable URL instead of
@@ -52,11 +52,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+# Repo root, i.e. the parent of the metadata/ package this module now
+# lives in -- NOT this file's own directory, so the cache location doesn't
+# shift if the package layout changes again.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Persistent cache location used only with --keep-clone (or --clone-dir).
 #: Override with BENCHMANTIC_REPO_CACHE, or per-invocation with --clone-dir.
-DEFAULT_CLONE_ROOT = SCRIPT_DIR / ".benchmantic_repo_cache"
+DEFAULT_CLONE_ROOT = REPO_ROOT / ".benchmantic_repo_cache"
 
 #: Root for throwaway clones (the default, no --keep-clone/--clone-dir).
 #: Kept as a known, dedicated subtree of the OS temp dir specifically so
@@ -142,7 +145,7 @@ def resolve_source(
 
     If it's a GitHub/GitLab/any git URL, clone it (or update an existing
     clone) and return the local path -- everything downstream
-    (metadata.builder, review.py's cache files, discover_cases(), etc.)
+    (metadata.builder, ai.review's cache files, discover_cases(), etc.)
     then works exactly as if a local checkout had been passed in the first
     place.
 

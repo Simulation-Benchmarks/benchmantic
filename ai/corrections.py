@@ -6,7 +6,7 @@
 ai.corrections
 
 Cross-benchmark memory of human corrections made during the interactive
-review step (see review.py): every time a reviewer edits an AI-inferred
+review step (see ai.review): every time a reviewer edits an AI-inferred
 parameter/metric field, the (AI-suggested -> human-corrected) pair is
 appended here, keyed loosely enough -- by raw key name, matched exactly or
 fuzzily -- that a SIMILAR item in a *different* benchmark module still
@@ -62,7 +62,7 @@ def load_corrections(path: Path | None = None) -> list[dict]:
 
 
 def append_corrections(new_entries: list[dict], path: Path | None = None) -> None:
-    """Append `new_entries` (as produced by review.py's interactive_review())
+    """Append `new_entries` (as produced by ai.review's interactive_review())
     to the on-disk store. No-op if there's nothing to add.
     """
     if not new_entries:
