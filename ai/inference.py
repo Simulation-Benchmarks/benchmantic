@@ -410,6 +410,7 @@ def _query_llm_json_array(
     retries: int,
     retry_delay: float,
     verbose: bool,
+    debug: bool = False,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
 ) -> list[dict]:
     """Shared request/retry/parse/validate loop used by both parameter and
@@ -420,7 +421,16 @@ def _query_llm_json_array(
     estimation..." section) BEFORE sending -- so a burst of small, otherwise-
     individually-fine requests can't collectively blow through the account's
     real rolling TPM window the way per-request-only checks would miss.
+
+    `verbose` and `debug` are two separate detail levels, not one: `verbose`
+    shows the short per-request header (endpoint/model/prompt size/estimated
+    cost) plus the rate-limiter's own wait/no-wait lines -- enough to see
+    what's happening without drowning in it. `debug` additionally dumps the
+    full request/response text -- implies `verbose` isn't required to also
+    be set (debug alone is enough to see everything; passing both is
+    harmless and just as verbose as debug alone).
     """
+    verbose = verbose or debug
     client = get_client(provider)
     resolved_model = model or PROVIDER_CONFIG[provider]["default_model"]
     messages = [
@@ -441,7 +451,7 @@ def _query_llm_json_array(
     for attempt in range(1, retries + 1):
         entry = limiter.reserve(estimated, verbose=verbose)
         try:
-            if verbose:
+            if debug:
                 print(f"\n--- Request (attempt {attempt}/{retries}) ---")
             start = time.monotonic()
             response = client.chat.completions.create(
@@ -454,7 +464,7 @@ def _query_llm_json_array(
             limiter.record_actual(entry, usage.total_tokens if usage is not None else None)
             raw_text = response.choices[0].message.content.strip()
 
-            if verbose:
+            if debug:
                 if usage is not None:
                     print(
                         f"--- Response (attempt {attempt}/{retries}, {elapsed:.2f}s, "
@@ -465,6 +475,9 @@ def _query_llm_json_array(
                     print(f"--- Response (attempt {attempt}/{retries}, {elapsed:.2f}s) ---")
                 print(raw_text)
                 print("--- end response ---\n")
+            elif verbose:
+                extra = f", prompt={usage.prompt_tokens} completion={usage.completion_tokens}" if usage else ""
+                print(f"[{provider}] response       : {elapsed:.2f}s{extra}")
 
             text = extract_json_array(raw_text)
             data = json.loads(text)
@@ -587,6 +600,7 @@ def infer_parameter_metadata(
     retries: int = 3,
     retry_delay: float = 2.0,
     verbose: bool = False,
+    debug: bool = False,
     known_corrections: list[dict] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
@@ -629,6 +643,7 @@ def infer_parameter_metadata(
                 retries=retries,
                 retry_delay=retry_delay,
                 verbose=verbose,
+                debug=debug,
                 tpm_budget=tpm_budget,
             ))
     return results
@@ -645,6 +660,7 @@ def infer_metric_metadata(
     retries: int = 3,
     retry_delay: float = 2.0,
     verbose: bool = False,
+    debug: bool = False,
     known_corrections: list[dict] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
@@ -675,6 +691,7 @@ def infer_metric_metadata(
                 retries=retries,
                 retry_delay=retry_delay,
                 verbose=verbose,
+                debug=debug,
                 tpm_budget=tpm_budget,
             ))
     return results

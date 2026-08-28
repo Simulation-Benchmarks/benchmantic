@@ -99,9 +99,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import config  # noqa: E402
 import metadata.builder as builder  # noqa: E402
+import show_description  # noqa: E402
 import snakefile.generator as generator  # noqa: E402
 from metadata.graph import load_graph  # noqa: E402
+
+REQUIRED_FLAGS = ("module_dir", "container_image", "container_shared_dir")
 
 
 def _slugify_benchmark_label(by_id: dict) -> str:
@@ -147,40 +151,46 @@ def derive_dataset_filename(by_id: dict) -> str:
     return f"{slug}_dataset.jsonld"
 
 
-def run_step(label: str, verbose: bool, fn, *fn_args, **fn_kwargs) -> None:
-    """Call `fn` (an in-process build step). By default, stays quiet --
-    prints one short line, and only dumps the step's captured stdout+stderr
-    if it actually fails (raises). Pass --verbose to always show it live
-    instead. Mirrors the original subprocess-based capture_output=True
-    behavior now that these run in-process instead.
+def run_step(label: str, verbose: bool, fn, *fn_args, **fn_kwargs):
+    """Call `fn` (an in-process build step) and return whatever it returns.
+    By default, stays quiet -- prints one short line, and only dumps the
+    step's captured stdout+stderr if it actually fails (raises). Pass
+    --verbose to always show it live instead. Mirrors the original
+    subprocess-based capture_output=True behavior now that these run
+    in-process instead.
     """
     print(f"-> {label}...")
     if verbose:
-        fn(*fn_args, **fn_kwargs)
-        return
+        return fn(*fn_args, **fn_kwargs)
 
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            fn(*fn_args, **fn_kwargs)
+            result = fn(*fn_args, **fn_kwargs)
     except SystemExit as exc:
         sys.stdout.write(buf.getvalue())
         sys.exit(f"Error: {label} failed -- {exc.code}")
     except Exception:
         sys.stdout.write(buf.getvalue())
         raise
+    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("module_dir", type=str,
+    ap.add_argument("module_dir", type=str, nargs="?", default=None,
                      help="Path to the benchmark module (or a repo checkout containing it) -- "
                           "anything metadata.builder can already handle. Also accepts a GitHub/GitLab/"
                           "any git-reachable URL (https://..., git://..., or an scp-like git@host:path "
                           "spec); by default it's cloned into a throwaway temp directory that's deleted "
-                          "once this run finishes -- see --keep-clone/--ref/--clone-dir/--fresh-clone.")
+                          "once this run finishes -- see --keep-clone/--ref/--clone-dir/--fresh-clone. "
+                          "Required, but may instead come from a 'module_dir:' key in --config.")
+    ap.add_argument("--config", type=Path, default=None,
+                     help="YAML file of flag defaults (see config.py) -- any flag also given explicitly "
+                          "on the command line overrides the same key here. Lets a benchmark's usual "
+                          "flag set live in a file instead of being retyped every run.")
     ap.add_argument("--ref", type=str, default=None,
                      help="Branch, tag, or commit to check out when module_dir is a git URL. Ignored for "
                           "a local module_dir. Default: the remote's default branch.")
@@ -251,13 +261,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "account's actual TPM cap, not equal to it -- e.g. 8,000-9,000 on a 12,000 TPM "
                             "account.")
     meta.add_argument("--skip-validation", action="store_true")
+    meta.add_argument("--outputs", type=str, default=None,
+                       help="Which artifacts to generate, beyond the always-generated benchmark "
+                            "description and review report: a preset ('standard' -- dataset+snakefile, "
+                            "the default; 'snakefile' -- snakefile only; 'dataset' -- dataset only; "
+                            "'description-only'/'none' -- neither), or an explicit comma-separated "
+                            "list of 'dataset','snakefile'. Default: reuse the module's saved "
+                            "selection, prompting interactively the first time (real terminal only).")
 
     # --- snakefile.generator pass-through ---
     snake = ap.add_argument_group("snakefile.generator options")
-    snake.add_argument("--container-image", required=True)
-    snake.add_argument("--container-shared-dir", required=True,
+    snake.add_argument("--container-image", default=None,
+                        help="Required, but may instead come from a 'container-image:' key in --config.")
+    snake.add_argument("--container-shared-dir", default=None,
                         help="Mount point inside the container used to save results back to the host "
-                             "(e.g. /dumux/shared) -- no universal default, this is tool/container-specific.")
+                             "(e.g. /dumux/shared) -- no universal default, this is tool/container-specific. "
+                             "Required, but may instead come from a 'container-shared-dir:' key in --config.")
     snake.add_argument("--executable", default=None)
     snake.add_argument("--build-dir", default=None)
     snake.add_argument("--results-subdir", default="results")
@@ -277,18 +296,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("-v", "--verbose", action="store_true",
                      help="Show the full underlying build output live, instead of the default short "
-                          "progress lines (still shown on failure either way).")
+                          "progress lines (still shown on failure either way). Includes discovery detail "
+                          "and, per LLM call, a one-line request header -- not the raw request/response "
+                          "text itself, see --debug.")
+    ap.add_argument("--debug", action="store_true",
+                     help="Everything --verbose shows, PLUS the exact request/response text for every "
+                          "LLM call. Implies --verbose's level of detail even if --verbose isn't also "
+                          "passed, and (like --verbose) always shows the step live.")
 
     return ap
 
 
-def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    """Run the full build (semantic description + dataset sidecar +
-    Snakefile). Returns (benchmark_path, dataset_path, snakefile_path) so
-    callers (e.g. workflow.py) can chain into show_description.py/
-    verify_description.py without re-deriving the output location
-    themselves.
+def _print_intro() -> None:
+    """One-time "here's what this tool does" banner shown before a real
+    interactive run starts (never in CI/--skip-review runs, where it'd
+    just be unwanted noise ahead of a script's own log parsing). Purely
+    orientation for a first-time user -- everything after this point is
+    the actual pipeline.
     """
+    print(
+        "\nbenchmantic\n"
+        "Semantic benchmark description and execution tool\n\n"
+        "This tool analyzes your simulation benchmark and produces:\n"
+        "  • semantic benchmark metadata\n"
+        "  • a machine-readable dataset description\n"
+        "  • a Snakefile for reproducible execution\n"
+        "  • a human-readable review report\n\n"
+        "Let's get started."
+    )
+    try:
+        input("\nPress Enter to continue...")
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
+def run(args: argparse.Namespace) -> tuple[Path, Path | None, Path | None]:
+    """Run the full build (semantic description, plus whichever of the
+    dataset sidecar / Snakefile / review report were selected in the
+    Outputs step -- see metadata.builder's _resolve_outputs_selection()).
+    Returns (benchmark_path, dataset_path, snakefile_path); the latter two
+    are None if that artifact wasn't generated this run. Callers (e.g.
+    workflow.py) only strictly need benchmark_path -- it's always
+    generated -- to chain into show_description.py/verify_description.py.
+    """
+    needs_interactive = args.scenario_params is None or not args.skip_review
+    if needs_interactive and not (args.verbose or args.debug):
+        try:
+            is_tty = sys.stdin.isatty()
+        except Exception:
+            is_tty = False
+        if is_tty:
+            _print_intro()
 
     staging_dir = Path(tempfile.mkdtemp(prefix="describe_benchmark_"))
     # Always stage under a fixed name -- the *final* filename may itself
@@ -314,7 +372,8 @@ def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         provider=args.provider or builder.DEFAULT_PROVIDER,
         model=args.model,
         fallback_on_error=args.fallback_on_error,
-        verbose=args.verbose,
+        verbose=args.verbose or args.debug,
+        debug=args.debug,
         clear_cache=args.clear_cache,
         skip_review=args.skip_review,
         review_confidence_threshold=(
@@ -334,6 +393,7 @@ def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         ),
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",
+        outputs=args.outputs,
     )
     # Two sub-steps inside metadata.builder.build() need a real terminal
     # (they call input()), so their output can't be silently captured into
@@ -342,105 +402,181 @@ def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     # supplied), and the interactive metadata review step (unless
     # --skip-review was passed). Force live output for the whole step
     # whenever either applies, regardless of --verbose, so prompts (and
-    # what you type) actually show up.
-    needs_interactive = args.scenario_params is None or not args.skip_review
-    if needs_interactive and not args.verbose:
+    # what you type) actually show up. (`needs_interactive` was already
+    # computed above, before the intro banner.)
+    if needs_interactive and not (args.verbose or args.debug):
         print("   (interactive parameter selection and/or metadata review is enabled -- showing this step live)")
-    run_step("Generating semantic description", args.verbose or needs_interactive, builder.build, builder_args)
+    stats = run_step(
+        "Generating semantic description", args.verbose or args.debug or needs_interactive,
+        builder.build, builder_args,
+    )
+    stats = stats or {}
 
     staged_by_id = load_graph(staged_benchmark)
     software_name = args.software_name or generator.derive_software_name(staged_by_id)
     benchmark_filename = args.benchmark_filename or derive_benchmark_filename(staged_by_id)
     dataset_filename = args.dataset_filename or derive_dataset_filename(staged_by_id)
     output_dir = Path("outputs") / software_name
-    print(f"-> Software: {software_name!r} (output directory: {output_dir}/)")
-    if not args.benchmark_filename:
-        print(f"-> Benchmark filename: {benchmark_filename!r} (derived from the benchmark's name)")
-    if not args.dataset_filename:
-        print(f"-> Dataset filename: {dataset_filename!r} (derived from the benchmark's name)")
+    if args.verbose or args.debug:
+        print(f"-> Software: {software_name!r} (output directory: {output_dir}/)")
+        if not args.benchmark_filename:
+            print(f"-> Benchmark filename: {benchmark_filename!r} (derived from the benchmark's name)")
+        if not args.dataset_filename:
+            print(f"-> Dataset filename: {dataset_filename!r} (derived from the benchmark's name)")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark_path = output_dir / benchmark_filename
-    dataset_path = output_dir / dataset_filename
+    dataset_path: Path | None = None
 
     shutil.move(str(staged_benchmark), str(benchmark_path))
+
+    # Which of the optional artifacts (beyond the benchmark description
+    # and the review report -- both always generated) this run actually
+    # produces -- resolved by metadata.builder's Outputs step and handed
+    # back via `stats["outputs"]` (a plain dict of {"dataset": bool,
+    # "snakefile": bool}). Falls back to "everything" if build() didn't
+    # return stats for some reason (shouldn't happen on a successful run,
+    # but keeps this defensive rather than crashing on a missing key).
+    outputs = stats.get("outputs") or dict(builder.DEFAULT_OUTPUTS)
 
     # Dataset sidecar (author, publisher, software dependencies -- see
     # metadata.builder.GraphBuilder.build_dataset_graph()) -- written by
     # metadata.builder.build() as "staged.dataset.jsonld" next to the staged
-    # benchmark file. Patch in the "schema:isPartOf" link back to the
-    # benchmark file's *final* name (only known now, not when that sidecar
-    # was written) before moving it into place.
+    # benchmark file, ONLY when "dataset" was selected in the Outputs step.
+    # Patch in the "schema:isPartOf" link back to the benchmark file's
+    # *final* name (only known now, not when that sidecar was written)
+    # before moving it into place.
     staged_dataset = staging_dir / "staged.dataset.jsonld"
-    if staged_dataset.exists():
+    if outputs.get("dataset", True) and staged_dataset.exists():
+        dataset_path = output_dir / dataset_filename
         dataset_doc = json.loads(staged_dataset.read_text(encoding="utf-8"))
         for node in dataset_doc.get("@graph", []):
             if node.get("@id") == "./":
                 node["schema:isPartOf"] = {"@id": benchmark_filename}
                 break
         dataset_path.write_text(json.dumps(dataset_doc, indent=2), encoding="utf-8")
-        print(f"-> Wrote {dataset_path}")
+        if args.verbose or args.debug:
+            print(f"-> Wrote {dataset_path}")
 
     staged_hints = staging_dir / "staged.build_hints.json"
+    hints_path = output_dir / f"{Path(benchmark_filename).stem}.build_hints.json"
     if staged_hints.exists():
-        shutil.move(str(staged_hints), str(output_dir / f"{Path(benchmark_filename).stem}.build_hints.json"))
+        shutil.move(str(staged_hints), str(hints_path))
     shutil.rmtree(staging_dir, ignore_errors=True)
 
     # 2. Snakefile -- generated into a throwaway workdir alongside the
     # per-case preview parameters.json files (neither of those is part of
     # the deliverable), then just the Snakefile itself is moved into
-    # output_dir as a plain file -- no zip packaging.
-    workdir = output_dir / ".generate_snakefile_workdir"
-    generator_args = argparse.Namespace(
-        metadata_jsonld=benchmark_path,
-        container_image=args.container_image,
-        container_shared_dir=args.container_shared_dir,
-        software_name=software_name,
-        executable=args.executable,
-        build_dir=args.build_dir,
-        results_subdir=args.results_subdir,
-        name_flag=args.name_flag,
-        zip_name_flag=args.zip_name_flag,
-        exclude_flag=args.exclude_flag,
-        mesh_split=args.mesh_split,
-        radial_cells_flag=args.radial_cells_flag,
-        angular_cells_flag=args.angular_cells_flag,
-        grading_flag=args.grading_flag,
-        inner_radius_flag=args.inner_radius_flag,
-        outer_radius_flag=args.outer_radius_flag,
-        outer_radius=args.outer_radius,
-        unit_symbol=args.unit_symbol,
-        output_dir=workdir,
-        zip=None,
-    )
-    run_step("Generating Snakefile", args.verbose, generator.generate, generator_args)
+    # output_dir as a plain file -- no zip packaging. Only when
+    # "snakefile" was selected in the Outputs step.
+    snakefile_path: Path | None = None
+    if outputs.get("snakefile", True):
+        workdir = output_dir / ".generate_snakefile_workdir"
+        generator_args = argparse.Namespace(
+            metadata_jsonld=benchmark_path,
+            container_image=args.container_image,
+            container_shared_dir=args.container_shared_dir,
+            software_name=software_name,
+            executable=args.executable,
+            build_dir=args.build_dir,
+            results_subdir=args.results_subdir,
+            name_flag=args.name_flag,
+            zip_name_flag=args.zip_name_flag,
+            exclude_flag=args.exclude_flag,
+            mesh_split=args.mesh_split,
+            radial_cells_flag=args.radial_cells_flag,
+            angular_cells_flag=args.angular_cells_flag,
+            grading_flag=args.grading_flag,
+            inner_radius_flag=args.inner_radius_flag,
+            outer_radius_flag=args.outer_radius_flag,
+            outer_radius=args.outer_radius,
+            unit_symbol=args.unit_symbol,
+            output_dir=workdir,
+            zip=None,
+        )
+        run_step("Generating Snakefile", args.verbose or args.debug, generator.generate, generator_args)
 
-    snakefile_path = output_dir / "Snakefile"
-    shutil.move(str(workdir / "Snakefile"), str(snakefile_path))
+        snakefile_path = output_dir / "Snakefile"
+        shutil.move(str(workdir / "Snakefile"), str(snakefile_path))
+        shutil.rmtree(workdir, ignore_errors=True)
 
-    # Clean up intermediates -- the workdir's per-case preview
-    # parameters.json files and the build_hints.json sidecar have both
-    # already served their purpose (the sidecar's executable/build-dir info
-    # is now baked directly into the Snakefile itself), so only the three
-    # requested artifacts are left behind.
-    shutil.rmtree(workdir, ignore_errors=True)
-    hints_path = output_dir / f"{Path(benchmark_filename).stem}.build_hints.json"
+    # build_hints.json is only ever an input to Snakefile generation (its
+    # executable/build-dir info gets baked directly into the Snakefile) --
+    # whether or not that step ran, it's implementation detail that
+    # shouldn't be left behind as a fourth file in output_dir.
     hints_path.unlink(missing_ok=True)
 
-    print(
-        f"\nDone -- all artifacts are in {output_dir}/:\n"
-        f"  benchmark file: {benchmark_path}\n"
-        f"  dataset file:   {dataset_path}\n"
-        f"  Snakefile:      {snakefile_path}\n\n"
-        f"Run with:\n"
-        f"  cd {output_dir} && python3 run_benchmark.py "
+    # 3. Review report -- show_description.py, called in-process the same
+    # way workflow.py normally chains it after this script. Always
+    # generated, same as the benchmark description itself -- not one of
+    # the Outputs step's choices (only "dataset" and "snakefile" are).
+    # Auto-discovers the sidecar dataset file next to benchmark_path if
+    # one was generated above; gracefully omits those sections if not, so
+    # a run without the dataset sidecar still gets a review report, just
+    # covering the benchmark's own parameters and metrics.
+    review_path: Path | None = output_dir / "review.md"
+    show_args = show_description.build_arg_parser().parse_args([str(benchmark_path)])
+    run_step("Generating review report", args.verbose or args.debug, show_description.run, show_args)
+
+    benchmark_label = (staged_by_id.get("./") or {}).get("name") or software_name
+    run_cmd = (
+        f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
+    artifact_paths = [p for p in (benchmark_path, dataset_path, snakefile_path, review_path) if p is not None]
+    _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path
 
 
+def _print_summary_box(
+    benchmark_label: str,
+    stats: dict,
+    output_dir: Path,
+    artifact_paths: list[Path],
+    run_cmd: str,
+) -> None:
+    """Final "done" state -- a boxed status summary instead of the raw
+    "Wrote .../Wrote .../Done" artifact dump every prior step already
+    implied. `stats` comes back from metadata.builder.build() (see its
+    docstring) -- parameter/metric/case counts and the RO-Crate validation
+    outcome, so this doesn't have to re-derive anything by re-parsing the
+    JSON-LD just written.
+    """
+    banner = "✓ Benchmark generated successfully"
+    width = min(78, max(len(banner) + 4, 48))
+    top = "╭" + "─" * (width - 2) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
+    print(f"\n{top}")
+    print(f"│ {banner:<{width - 4}} │")
+    print(bottom)
+
+    print(f"\nBenchmark\n  {benchmark_label}")
+
+    rocrate_passed = stats.get("rocrate_validation_passed")
+    if rocrate_passed is None:
+        rocrate_line = "○ RO-Crate 1.1 (skipped)"
+    elif rocrate_passed:
+        rocrate_line = "✓ RO-Crate 1.1"
+    else:
+        rocrate_line = "✗ RO-Crate 1.1 -- see --verbose for the failing checks"
+
+    print(
+        f"\nSemantic description\n"
+        f"  {stats.get('parameters', '?')} parameters\n"
+        f"  {stats.get('metrics', '?')} metrics\n"
+        f"  {stats.get('cases', '?')} benchmark case(s)"
+    )
+    print(f"\nValidation\n  {rocrate_line}")
+
+    print(f"\nGenerated files\n  {output_dir}/")
+    for p in artifact_paths:
+        print(f"    {p.name}")
+
+    print(f"\nNext step:\n\n  {run_cmd}\n")
+
+
 def main(argv: list[str] | None = None) -> None:
-    args = build_arg_parser().parse_args(argv)
+    args = config.parse_with_config(build_arg_parser(), list(argv if argv is not None else sys.argv[1:]), REQUIRED_FLAGS)
     run(args)
 
 

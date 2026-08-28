@@ -20,6 +20,14 @@ so ai.corrections can remember it for future runs on other benchmarks.
 Not run at all when --skip-review is passed (required for non-interactive/CI
 use -- same rationale as describe_benchmark.py's --scenario-params prompt:
 this needs a real terminal for input()).
+
+metadata.builder calls review_or_skip_combined() (not the older
+review_or_skip(), called once per kind) so parameters and metrics go
+through ONE review pass instead of two back-to-back table sessions. On a
+real terminal that supports it, this shows ai.tui's curses queue -- only
+the flagged items, everything else auto-accepted -- with a plain-text
+fallback (this module's own interactive_review(), run once per kind, same
+as always) whenever curses isn't usable or the reviewer backs out of it.
 """
 
 from __future__ import annotations
@@ -125,6 +133,41 @@ def _print_table(items: list[dict], kind: str, threshold: float = DEFAULT_CONFID
         print("(" + "; ".join(notes) + ")")
 
 
+def _apply_field_edit(item: dict, field: str, new_value: str) -> tuple[str, str | None]:
+    """Validate/normalize `new_value` for `field` and apply it to `item`
+    in place: sets confidence back to 1.0 (a human just confirmed this
+    field directly, so the AI's uncertainty no longer applies), appends a
+    "manually corrected by reviewer" note to "explanation", marks
+    "_edited", and clears any "_needs_verification" flag.
+
+    This is the single place BOTH front-ends that let a reviewer edit a
+    field -- this module's plain-text _edit_row() (via input()) and
+    ai.tui's curses review queue -- apply an edit, so the two UIs can't
+    drift apart on what counts as a valid unit/datatype/quantityKind or
+    what bookkeeping an edit triggers.
+
+    Returns (applied_value, warning): `applied_value` is what was
+    actually stored (a bare quantityKind name like "Pressure" is expanded
+    to its full QUDT URI before being stored), `warning` is a one-line
+    caveat worth showing the reviewer (e.g. an unrecognized datatype), or
+    None if there's nothing to flag.
+    """
+    warning = None
+    if field == "datatype" and new_value not in ALLOWED_DATATYPES:
+        warning = f"{new_value!r} isn't one of {ALLOWED_DATATYPES} -- saved as-is, please double check."
+    if field == "quantityKind" and not new_value.startswith("http"):
+        new_value = f"http://qudt.org/vocab/quantitykind/{new_value}"
+    if field == "unit" and not new_value.startswith("unit:"):
+        warning = f"{new_value!r} doesn't look like a QUDT unit CURIE (expected 'unit:XXX') -- saved as-is."
+
+    item[field] = new_value
+    item["confidence"] = 1.0
+    _append_note(item, "manually corrected by reviewer")
+    item["_edited"] = True
+    item.pop("_needs_verification", None)
+    return new_value, warning
+
+
 def _edit_row(item: dict, kind: str) -> None:
     fields = PARAM_FIELDS if kind == "parameter" else METRIC_FIELDS
     while True:
@@ -143,21 +186,12 @@ def _edit_row(item: dict, kind: str) -> None:
             print("No change (empty input).")
             continue
 
-        if field == "datatype" and new_value not in ALLOWED_DATATYPES:
-            print(f"warning: {new_value!r} isn't one of {ALLOWED_DATATYPES} -- saved as-is, please double check.")
-        if field == "quantityKind" and not new_value.startswith("http"):
-            expanded = f"http://qudt.org/vocab/quantitykind/{new_value}"
-            print(f"  (expanded {new_value!r} -> {expanded!r})")
-            new_value = expanded
-        if field == "unit" and not new_value.startswith("unit:"):
-            print(f"warning: {new_value!r} doesn't look like a QUDT unit CURIE (expected 'unit:XXX') -- saved as-is.")
-
-        item[field] = new_value
-        item["confidence"] = 1.0
-        _append_note(item, "manually corrected by reviewer")
-        item["_edited"] = True
-        item.pop("_needs_verification", None)
-        print(f"  {field} -> {new_value!r}")
+        applied, warning = _apply_field_edit(item, field, new_value)
+        if field == "quantityKind" and applied != new_value:
+            print(f"  (expanded {new_value!r} -> {applied!r})")
+        if warning:
+            print(f"warning: {warning}")
+        print(f"  {field} -> {applied!r}")
 
 
 def _append_note(item: dict, note: str) -> None:
@@ -263,6 +297,80 @@ def interactive_review(
         # no-op by the time we get here.
         item.pop("_needs_verification", None)
     return items, corrections
+
+
+def review_or_skip_combined(
+    param_items: list[dict],
+    metric_items: list[dict],
+    skip: bool,
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Combined-queue counterpart to review_or_skip(): reviews parameters
+    AND metrics in a single pass instead of two separate back-to-back
+    table sessions.
+
+    Tries ai.tui's curses review queue first. Items actually flagged --
+    low confidence or "_needs_verification" -- are always offered for
+    review; everything else was auto-accepted, and the reviewer is
+    explicitly asked on the summary screen whether they'd like to look at
+    those too ("A"), not just be told a count -- so a run where nothing
+    happened to get flagged still gives them the chance to double-check
+    it, not just a "nothing to review" message. If curses isn't usable (no
+    real TTY, the module isn't importable, the reviewer backs out with
+    'q'/Escape) or `skip` was passed, falls back to running
+    interactive_review() for each kind in turn, exactly as before -- so
+    this is always safe to call in place of two separate review_or_skip()
+    calls, with no behavior change for --skip-review or non-interactive
+    callers.
+
+    Returns (final_param_items, final_metric_items, param_corrections,
+    metric_corrections).
+    """
+    if skip or (not param_items and not metric_items):
+        return param_items, metric_items, [], []
+
+    if not skip:
+        try:
+            from ai import tui
+        except ImportError:
+            tui = None  # type: ignore[assignment]
+
+        if tui is not None and tui.available():
+            all_items = [("parameter", item) for item in param_items] + [("metric", item) for item in metric_items]
+            flagged_idx_set = set(_flagged_indices([item for _, item in all_items], confidence_threshold))
+            flagged = [item for i, item in enumerate(all_items) if i in flagged_idx_set]
+            accepted = [item for i, item in enumerate(all_items) if i not in flagged_idx_set]
+
+            originals = {id(item): copy.deepcopy(item) for _, item in all_items}
+            # Always show the summary screen (as long as there's anything
+            # at all) rather than short-circuiting to "nothing to review"
+            # when flagged is empty -- that screen is also where the
+            # reviewer is offered the chance to look at the auto-accepted
+            # items, which they should get even when everything happened
+            # to meet the confidence threshold this run.
+            completed = tui.review_queue(flagged, accepted, confidence_threshold) if all_items else True
+
+            if completed:
+                param_corrections = _diff_corrections(
+                    [originals[id(item)] for item in param_items], param_items, "parameter",
+                )
+                metric_corrections = _diff_corrections(
+                    [originals[id(item)] for item in metric_items], metric_items, "metric",
+                )
+                for item in param_items + metric_items:
+                    item.pop("_edited", None)
+                    item.pop("_needs_verification", None)
+                return param_items, metric_items, param_corrections, metric_corrections
+            # completed is None/False: curses unavailable or cancelled --
+            # any edits already applied to individual items (the queue
+            # edits in place, item by item, not atomically at the end)
+            # are harmless to keep; fall through to the plain-text path
+            # for whatever's left, which will simply show already-edited
+            # rows as accepted ('*') rather than flagged.
+
+    final_param_items, param_corrections = interactive_review(param_items, "parameter", confidence_threshold)
+    final_metric_items, metric_corrections = interactive_review(metric_items, "metric", confidence_threshold)
+    return final_param_items, final_metric_items, param_corrections, metric_corrections
 
 
 def review_or_skip(

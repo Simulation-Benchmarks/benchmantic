@@ -32,6 +32,12 @@ options control the later steps:
                                      (saves the tables to a file instead of
                                      printing them)
     --skip-show / --skip-check      skip either later step
+    --config PATH                   YAML file of flag defaults, covering
+                                     both this script's own flags above and
+                                     everything describe_benchmark accepts
+                                     -- see config.py. A flag also given
+                                     explicitly on the command line always
+                                     overrides the same key in the file.
 
 Usage
 -----
@@ -42,6 +48,10 @@ Usage
         --container-shared-dir /dumux/shared \\
         --mesh-split --zip-name-flag Problem.Name \\
         --semantic-benchmark-src ../semantic-benchmark
+
+    # ...or, with the same flags saved in a file (see config.py for the
+    # exact key names -- same as the flags above, minus the leading "--"):
+    python3 workflow.py --config rotating-cylinders.yaml
 
 Note: -h/--help here shows describe_benchmark's help (since its parser
 consumes whatever it recognizes first) -- run the three scripts' own
@@ -57,6 +67,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import config  # noqa: E402
 import describe_benchmark  # noqa: E402
 import verify_description  # noqa: E402
 import show_description  # noqa: E402
@@ -66,16 +77,28 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(argv if argv is not None else sys.argv[1:])
 
     # Pull out workflow-only flags first; everything else goes to
-    # describe_benchmark's own parser untouched.
+    # describe_benchmark's own parser untouched. --config is workflow-only
+    # too (peeled here, not passed through) since one config file needs to
+    # supply defaults for BOTH this parser and describe_benchmark's --
+    # see config.apply_config().
     extra_ap = argparse.ArgumentParser(add_help=False)
+    extra_ap.add_argument("--config", type=Path, default=None)
     extra_ap.add_argument("--semantic-benchmark-src", type=Path, default=None)
     extra_ap.add_argument("--show-output", type=Path, default=None)
     extra_ap.add_argument("--skip-show", action="store_true")
     extra_ap.add_argument("--skip-check", action="store_true")
+
+    db_parser = describe_benchmark.build_arg_parser()
+
+    config_path = config.peek_config_path(argv)
+    if config_path is not None:
+        config.apply_config(config.load_config_file(config_path), extra_ap, db_parser, source=config_path)
+
     extra_args, remaining = extra_ap.parse_known_args(argv)
 
     print("=== describe_benchmark ===")
-    build_args = describe_benchmark.build_arg_parser().parse_args(remaining)
+    build_args = db_parser.parse_args(remaining)
+    config.check_required(build_args, describe_benchmark.REQUIRED_FLAGS)
     benchmark_path, dataset_path, snakefile_path = describe_benchmark.run(build_args)
 
     if not extra_args.skip_show:
