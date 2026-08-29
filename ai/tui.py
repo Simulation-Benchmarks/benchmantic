@@ -115,44 +115,49 @@ OUTPUT_ITEM_INFO = {
 #: Outputs-step presets (see metadata.builder's Outputs step) -- "Custom"
 #: isn't listed here, it's handled as its own branch in output_picker()
 #: since it opens the checkbox screen instead of returning a fixed dict.
-#: The full 2x2 grid over the two real toggles (dataset, snakefile) is
-#: covered exactly once each: both on ("Standard"), snakefile only
-#: ("Snakefile"), dataset only ("With dataset"), neither ("Description
-#: only").
+#: The full 2x2 grid over the two real Custom-reachable toggles (dataset,
+#: snakefile) is covered exactly once each, always with description=True:
+#: both on ("Standard"), snakefile only ("Workflow + Description"), dataset
+#: only ("Description + Dataset"), neither ("Description only"). "Workflow
+#: only" is a fifth, DELIBERATELY NOT Custom-reachable preset: it's the
+#: only way to turn "description" off (which also forces "dataset" off --
+#: the dataset sidecar's "schema:isPartOf" link points at the benchmark
+#: file, which wouldn't exist -- and skips the Groq/OpenAI call and the
+#: review report entirely, see metadata.builder's Infer & review step).
+#: Keeping description=False out of the general Custom checkbox screen
+#: avoids an incoherent combination (dataset=True, description=False)
+#: that Custom's plain toggle-loop UI has no natural way to prevent a
+#: reviewer from picking. Display names only -- the dict keys themselves
+#: are purely internal to this interactive picker and its plain-text
+#: fallback (metadata.builder._plain_outputs_prompt()); they're unrelated
+#: to and don't need to match the `--outputs <preset>` CLI values
+#: (metadata.builder._OUTPUT_PRESET_ALIASES), which are their own separate
+#: kebab-case vocabulary ("standard", "snakefile-only", ...) kept stable
+#: for scripts/CI regardless of how this menu's labels are worded.
 OUTPUT_PRESETS: dict[str, dict[str, bool]] = {
-    "Standard": {"dataset": True, "snakefile": True},
-    "Snakefile": {"dataset": False, "snakefile": True},
-    "Description only": {"dataset": False, "snakefile": False},
-    "With dataset": {"dataset": True, "snakefile": False},
+    "Standard": {"description": True, "dataset": True, "snakefile": True},
+    "Workflow + Description": {"description": True, "dataset": False, "snakefile": True},
+    "Workflow only": {"description": False, "dataset": False, "snakefile": True},
+    "Description only": {"description": True, "dataset": False, "snakefile": False},
+    "Description + Dataset": {"description": True, "dataset": True, "snakefile": False},
 }
 
 #: One-line, plain-language description of what each preset actually
 #: does, shown next to its name wherever a preset is offered (the curses
 #: picker below and metadata.builder's plain-text fallback) instead of
-#: just a comma list of included artifact keys. The semantic description
-#: (benchmark.jsonld) AND the review report are always generated no
-#: matter which preset is chosen -- neither is one of the two toggles
-#: these presets set -- so every description below leads with that
-#: shared fact, then names whatever else (dataset provenance and/or a
-#: Snakefile) that preset adds on top of it.
+#: just a comma list of included artifact keys -- kept deliberately short
+#: (one line each) so the preset menu reads at a glance; the fuller
+#: picture (no LLM/Groq call in "Workflow only", the unit-suffix caveat
+#: that mode carries, exactly which files each preset skips) lives in
+#: README.md/SKILL.md and in this screen's own live per-file preview
+#: pane, not repeated here.
 OUTPUT_PRESET_INFO: dict[str, str] = {
-    "Standard": (
-        "Generates the semantic description and review report for the corresponding benchmark, "
-        "plus dataset provenance and a reproducible Snakemake workflow."
-    ),
-    "Snakefile": (
-        "Generates the semantic description and review report for the corresponding benchmark, "
-        "plus a reproducible Snakemake workflow -- no separate dataset-provenance file."
-    ),
-    "Description only": (
-        "Generates the semantic description for the corresponding benchmark and a review report "
-        "covering only its input and output parameters -- no dataset provenance, no Snakefile."
-    ),
-    "With dataset": (
-        "Generates the semantic description for the corresponding benchmark, plus dataset "
-        "provenance and a review report -- no Snakefile."
-    ),
-    "Custom": "Choose individually whether to also generate dataset provenance and/or a Snakefile.",
+    "Standard": "Semantic description, dataset provenance, and Snakefile.",
+    "Workflow + Description": "Semantic description and Snakefile -- no dataset provenance.",
+    "Workflow only": "Reproducible Snakefile workflow from discovered parameter values.",
+    "Description only": "Semantic description -- no dataset provenance, no Snakefile.",
+    "Description + Dataset": "Semantic description and dataset provenance -- no Snakefile.",
+    "Custom": "Choose dataset provenance and/or Snakefile individually.",
 }
 
 
@@ -245,22 +250,36 @@ def _select_menu(
     overlapping, half-overwritten text a plain per-field addstr with no
     erase produces. Redrawing everything from scratch every frame avoids
     that regardless of whether or when a resize happens.
+
+    Scrolls the option list (independently of whatever's above it via
+    `header`) if there isn't room for all of it plus a footer row -- same
+    reasoning as _select_menu_with_details' own scrolling.
     """
     cursor = max(0, min(start, len(options) - 1))
+    top = 0
     while True:
         stdscr.erase()
         if header is not None:
             header()
+        max_y, max_x = stdscr.getmaxyx()
+        visible_rows = max(1, max_y - (y0 + 1) - 1)  # title row + 1 footer row
+        if cursor < top:
+            top = cursor
+        if cursor >= top + visible_rows:
+            top = cursor - visible_rows + 1
+        top = max(0, min(top, max(0, len(options) - visible_rows)))
         _safe_addstr(stdscr, y0, 0, title, curses.A_BOLD)
-        for i, opt in enumerate(options):
+        for row, i in enumerate(range(top, min(len(options), top + visible_rows))):
             attr = curses.A_REVERSE if i == cursor else 0
             marker = "❯ " if i == cursor else "  "
             digit = f"{i + 1}) " if i < 9 else "   "
-            _safe_addstr(stdscr, y0 + 1 + i, 0, f"{marker}{digit}{opt}", attr)
-        _safe_addstr(
-            stdscr, y0 + 1 + len(options) + 1, 0,
-            "  ↑/↓ or a number to highlight, enter to confirm, q cancel",
-        )
+            _safe_addstr(stdscr, y0 + 1 + row, 0, f"{marker}{digit}{options[i]}", attr)
+        footer = "  ↑/↓ or a number to highlight, enter to confirm, q cancel"
+        if top + visible_rows < len(options):
+            footer += "  (more below)"
+        elif top > 0:
+            footer += "  (more above)"
+        _safe_addstr(stdscr, min(y0 + 1 + visible_rows, max_y - 1), 0, footer)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (curses.KEY_UP, ord("k")):
@@ -295,8 +314,18 @@ def _select_menu_with_details(
     (`header`, if given, redraws whatever the caller wants above the
     menu) so a terminal resize mid-menu can't leave stale text from the
     previous width's line-wrapping sitting underneath the new layout.
+
+    Scrolls when the options (each possibly several lines once its detail
+    text wraps) don't all fit the terminal's current height -- a fixed
+    terminal height plus six presets with multi-line descriptions meant
+    the last couple of options could land entirely off-screen with no way
+    to reach them short of resizing the terminal itself; up/down (and the
+    digit jump) now scroll the visible window to keep whatever's
+    highlighted in view, the same way _checkbox_list_impl already does
+    for the parameter list.
     """
     cursor = max(0, min(start, len(options) - 1))
+    top_line = 0
     while True:
         stdscr.erase()
         if header is not None:
@@ -304,18 +333,57 @@ def _select_menu_with_details(
         max_y, max_x = stdscr.getmaxyx()
         detail_width = max(10, max_x - 7)
         wrapped = [_wrap_text(d, detail_width) if d else [] for d in details]
+
+        # Flatten into one line per row to draw -- an option's own header
+        # line, then zero or more indented detail lines -- so scrolling
+        # can work at row granularity regardless of how many lines any
+        # one option's wrapped description takes up.
+        lines: list[tuple[int, str, bool]] = []
+        option_start: list[int] = []
+        for i, opt in enumerate(options):
+            option_start.append(len(lines))
+            lines.append((i, opt, True))
+            for dline in wrapped[i]:
+                lines.append((i, dline, False))
+
+        visible_rows = max(1, max_y - (y0 + 1) - 1)  # title row + 1 footer row
+        cur_start = option_start[cursor]
+        cur_span = 1 + len(wrapped[cursor])
+        if cur_start < top_line:
+            top_line = cur_start
+        if cur_start + cur_span > top_line + visible_rows:
+            # Scroll down just enough to show as much of this option as
+            # fits -- but never past its OWN header line. Without this
+            # cap, an option whose wrapped detail text alone is taller
+            # than the whole visible window (cur_span > visible_rows,
+            # possible for a long detail line on a short/narrow terminal)
+            # would push top_line past cur_start, scrolling the
+            # option's name itself off the top of the screen -- the exact
+            # bug this scrolling was added to fix, just relocated. Losing
+            # a few of its own detail lines off the bottom is an
+            # acceptable tradeoff; losing the option's own name/highlight
+            # off the top is not.
+            top_line = min(cur_start + cur_span - visible_rows, cur_start)
+        top_line = max(0, min(top_line, max(0, len(lines) - visible_rows)))
+
         _safe_addstr(stdscr, y0, 0, title, curses.A_BOLD)
         y = y0 + 1
-        for i, opt in enumerate(options):
-            attr = curses.A_REVERSE if i == cursor else 0
-            marker = "❯ " if i == cursor else "  "
-            digit = f"{i + 1}) " if i < 9 else "   "
-            _safe_addstr(stdscr, y, 0, f"{marker}{digit}{opt}", attr)
+        for li in range(top_line, min(len(lines), top_line + visible_rows)):
+            idx, text, is_header_line = lines[li]
+            if is_header_line:
+                attr = curses.A_REVERSE if idx == cursor else 0
+                marker = "❯ " if idx == cursor else "  "
+                digit = f"{idx + 1}) " if idx < 9 else "   "
+                _safe_addstr(stdscr, y, 0, f"{marker}{digit}{text}", attr)
+            else:
+                _safe_addstr(stdscr, y, 6, text)
             y += 1
-            for line in wrapped[i]:
-                _safe_addstr(stdscr, y, 6, line)
-                y += 1
-        _safe_addstr(stdscr, y + 1, 0, "  ↑/↓ or a number to highlight, enter to confirm, q cancel")
+        footer = "  ↑/↓ or a number to highlight, enter to confirm, q cancel"
+        if top_line + visible_rows < len(lines):
+            footer += "  (more below)"
+        elif top_line > 0:
+            footer += "  (more above)"
+        _safe_addstr(stdscr, min(y0 + 1 + visible_rows, max_y - 1), 0, footer)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (curses.KEY_UP, ord("k")):
@@ -331,31 +399,48 @@ def _select_menu_with_details(
 
 
 def _text_input(stdscr, y: int, prompt: str, initial: str = "") -> str | None:
-    """Text prompt drawn starting at row `y`, using curses' own line-edit
-    (echo + getstr) rather than dropping out of curses mode -- keeps the
-    whole interaction inside the same screen. Returns the typed text
-    (stripped), or None if the reviewer cancelled with an empty
-    Escape-then-Enter... in practice curses' getstr() doesn't expose
-    Escape directly, so cancellation here is just "typed nothing" (an
-    empty string counts as "no change", same as the plain-text editor).
+    """Text prompt drawn starting at row `y`, using a small hand-rolled
+    line editor (not curses' echo+getstr, see below) -- keeps the whole
+    interaction inside the same screen. Returns the edited text (stripped),
+    or None if the reviewer cancelled with Escape (in which case the field
+    is left completely untouched, same as before this was ever entered).
+
+    `initial` pre-fills the editable buffer with the field's current value
+    (the caller passes `item.get(field)`) -- editing now means what it
+    normally means: the cursor starts at the end of the existing text,
+    Left/Right (or Ctrl-A/Ctrl-E/Home/End) move within it, Backspace/Delete
+    remove one character on either side of the cursor, and typing inserts
+    at the cursor position rather than overwriting anything. Before this,
+    the field started BLANK regardless of its current value -- the current
+    value was only ever shown as read-only text in the prompt above, so
+    changing one word deep inside a long explanation meant retyping the
+    entire sentence from scratch. curses' own getstr() can't do in-place
+    editing at all (no pre-fill, no cursor movement, Escape isn't even
+    exposed to it), which is why this reimplements a minimal line editor
+    with getch() instead -- it's more code, but it's what "edit" actually
+    means here.
+
+    If the buffer is wider than the available line width (routine for a
+    100+ character explanation), the visible window scrolls horizontally
+    to keep the cursor in view, the same idea as the digit-jump buffer in
+    _checkbox_list_impl. Only single-byte/ASCII characters can be newly
+    typed in -- a full UTF-8-aware line editor (multi-byte sequences
+    arrive one getch() call at a time) is more than this needs; existing
+    non-ASCII text in `initial` still displays and edits around fine,
+    since it's already a decoded Python str, not something this function
+    has to decode itself.
 
     `prompt` (e.g. "New value for explanation (current: '...a full
     sentence...'): ") is word-wrapped across as many lines as it needs to
     fit the window's actual width -- it used to be a single _safe_addstr
     call that silently CLIPPED anything past the window edge, which for a
-    field with a long current value (explanations routinely run well past
-    100 characters) meant most of it was simply invisible on anything
-    short of a maximized terminal, even after the input line itself was
-    fixed to always have room to type into (see below). Typing always
-    happens on its own line, right after however many lines the prompt
-    took, starting at a fixed column -- this used to put the input cursor
-    at `len(prompt) + 1`, clamped to `max_x - 1` if that overflowed, which
-    for the same long-current-value case pinned the cursor at the very
-    last column of the screen with no room left to type into at all
-    ("the cursor doesn't move" / "I can't edit"). Decoupling the input
-    line from the prompt's length (now its *line count*, not raw
-    character count) is what keeps both problems from recurring
-    regardless of how long a field's current value is.
+    field with a long current value meant most of it was simply invisible
+    on anything short of a maximized terminal. Typing always happens on
+    its own line, right after however many lines the prompt took,
+    starting at a fixed column -- decoupling the input line from the
+    prompt's raw length (its *line count* now, not character count) is
+    what keeps a long current value from ever pinning the cursor
+    off-screen with no room left to edit into.
     """
     max_y, max_x = stdscr.getmaxyx()
     wrap_width = max(10, max_x - 1)
@@ -371,21 +456,57 @@ def _text_input(stdscr, y: int, prompt: str, initial: str = "") -> str | None:
         _safe_addstr(stdscr, prompt_y + i, 0, line)
         stdscr.clrtoeol()
     input_y = min(prompt_y + len(prompt_lines), max_y - 1)
-    _safe_addstr(stdscr, input_y, 0, "> ")
-    stdscr.clrtoeol()
-    stdscr.refresh()
-    curses.echo()
+
+    buffer = list(initial)
+    cursor = len(buffer)
+    view_offset = 0
+    stdscr.keypad(True)
     curses.curs_set(1)
     try:
-        n = max(1, min(200, max_x - 3))
-        raw = stdscr.getstr(input_y, 2, n)
-        text = raw.decode("utf-8", errors="replace").strip()
-    except Exception:
-        text = ""
+        while True:
+            max_y, max_x = stdscr.getmaxyx()
+            avail = max(1, max_x - 3)
+            if cursor - view_offset >= avail:
+                view_offset = cursor - avail + 1
+            if cursor < view_offset:
+                view_offset = cursor
+            view_offset = max(0, view_offset)
+            text = "".join(buffer)
+            _safe_addstr(stdscr, input_y, 0, "> ")
+            stdscr.clrtoeol()
+            _safe_addstr(stdscr, input_y, 2, text[view_offset:view_offset + avail])
+            with contextlib.suppress(curses.error):
+                stdscr.move(input_y, 2 + (cursor - view_offset))
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key in ENTER_KEYS:
+                return "".join(buffer).strip() or None
+            if key == 27:  # Escape -- cancel, field left untouched
+                return None
+            if key in (curses.KEY_LEFT,):
+                cursor = max(0, cursor - 1)
+            elif key in (curses.KEY_RIGHT,):
+                cursor = min(len(buffer), cursor + 1)
+            elif key in (curses.KEY_HOME, 1):  # 1 = Ctrl-A
+                cursor = 0
+            elif key in (curses.KEY_END, 5):  # 5 = Ctrl-E
+                cursor = len(buffer)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor > 0:
+                    del buffer[cursor - 1]
+                    cursor -= 1
+            elif key in (curses.KEY_DC,):  # Delete (forward)
+                if cursor < len(buffer):
+                    del buffer[cursor]
+            elif 32 <= key < 127:  # printable ASCII -- insert at cursor
+                buffer.insert(cursor, chr(key))
+                cursor += 1
+            # Anything else (an unrecognized/non-ASCII byte, a function
+            # key with no binding here) is silently ignored rather than
+            # inserted as garbage or crashing the editor.
     finally:
-        curses.noecho()
         curses.curs_set(0)
-    return text or None
 
 
 # =============================================================================
@@ -413,6 +534,24 @@ def checkbox_list(title: str, subtitle: str, labels: list[str], checked: set[int
 def _checkbox_list_impl(stdscr, title: str, subtitle: str, labels: list[str], checked: set[int]) -> set[int]:
     curses.curs_set(0)
     stdscr.keypad(True)
+    colors_ok = _init_colors()
+    max_y, max_x = stdscr.getmaxyx()
+    # A long list (the 38-parameter selector is the motivating case) reads
+    # much better split into two side-by-side columns -- numbered 1..split
+    # on the left, split+1..N on the right -- than as one long scroll a
+    # reviewer has to page all the way down just to see the last few
+    # items. Only worth it once there's enough width for two real columns
+    # AND enough items that a single column would need real scrolling
+    # anyway; a short list (e.g. the Outputs step's own 2-item Custom
+    # toggle) stays single-column, where a second, mostly-empty column
+    # would just look broken.
+    two_col = len(labels) > 12 and max_x >= 100
+    if two_col:
+        return _checkbox_list_two_col(stdscr, title, subtitle, labels, checked, colors_ok)
+    return _checkbox_list_one_col(stdscr, title, subtitle, labels, checked, colors_ok)
+
+
+def _checkbox_list_one_col(stdscr, title: str, subtitle: str, labels: list[str], checked: set[int], colors_ok: bool) -> set[int]:
     cursor, top = 0, 0
     # A typed number buffer for jumping straight to (and toggling) any row
     # by its absolute position, not just the first 9 currently on screen --
@@ -525,6 +664,159 @@ def _checkbox_list_impl(stdscr, title: str, subtitle: str, labels: list[str], ch
             checked.symmetric_difference_update({cursor})
         elif key in (ord("a"), ord("A")):
             checked = set(range(len(labels)))
+        elif key in (ord("n"), ord("N")):
+            checked = set()
+
+
+def _checkbox_list_two_col(stdscr, title: str, subtitle: str, labels: list[str], checked: set[int], colors_ok: bool) -> set[int]:
+    """Side-by-side two-column variant of the checkbox list, for a long
+    list on a wide terminal (the 38-parameter selector is the motivating
+    case): items 1..split numbered down the left column, split+1..N down
+    the right, with Tab hopping the highlight to the matching row in the
+    other column -- reading down one short column, then the other, beats
+    scrolling through one long one.
+
+    Same underlying selection semantics as the single-column version
+    (Space toggles, a digit typed anywhere jumps to that absolute item
+    number in whichever column it lands in, Enter with no digits pending
+    confirms, 'a'/'n' select all/none, 'q'/Escape cancels) -- only the
+    layout and the extra Tab binding differ.
+    """
+    n = len(labels)
+    split = -(-n // 2)  # ceil(n / 2): left column gets the extra item if n is odd
+    cursor = 0
+    top_row = 0  # shared vertical scroll offset, in rows-within-a-column
+    buffer = ""
+
+    def col_bounds(i: int) -> tuple[int, int]:
+        return (0, split - 1) if i < split else (split, n - 1)
+
+    while True:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        digit_width = len(str(n))
+        col_w = max(24, (max_x - 6) // 2)
+
+        _safe_addstr(stdscr, 0, 0, title, curses.A_BOLD | _cp(colors_ok, 1))
+        selected_badge = f"Selected  {len(checked)}/{n}"
+        _safe_addstr(stdscr, 0, max(0, max_x - len(selected_badge) - 1), selected_badge, _cp(colors_ok, 2) | curses.A_BOLD)
+        for line in _wrap_text(subtitle, max(10, max_x - 1)):
+            _safe_addstr(stdscr, 1, 0, line)
+            break  # keep the header to one line; the rest is still in subtitle for callers that need it
+
+        info_y = 2
+        _safe_addstr(stdscr, info_y, 0, "Use ↑/↓ to navigate, SPACE to toggle, TAB to switch columns, ENTER when done.")
+
+        legend_y = info_y + 2
+        _safe_addstr(stdscr, legend_y, 0, "Legend: [x] selected   [ ] not selected")
+        commands = "a: all   n: none   q: cancel"
+        _safe_addstr(stdscr, legend_y, max(0, max_x - len(commands) - 1), commands)
+
+        header_y = legend_y + 2
+        left_x, right_x = 0, col_w + 3
+        _safe_addstr(stdscr, header_y, left_x, "#".rjust(digit_width) + "  Parameter", curses.A_UNDERLINE)
+        _safe_addstr(stdscr, header_y, right_x, "#".rjust(digit_width) + "  Parameter", curses.A_UNDERLINE)
+
+        list_top = header_y + 1
+        footer_selected_lines = _wrap_text(
+            f"{len(checked)} parameter(s) selected: " + ", ".join(labels[i] for i in sorted(checked)) if checked
+            else "No parameters selected.",
+            max(10, max_x - 1),
+        )[:3]
+        bottom_bar = "↑/↓ navigate   SPACE toggle   TAB switch column   a all   n none   ENTER finish   q cancel"
+        # rows reserved below the list: 1 blank + up to 3 summary lines + 1 blank + bottom bar
+        reserved_bottom = 1 + len(footer_selected_lines) + 1 + 1
+        visible_rows = max(1, max_y - list_top - reserved_bottom)
+
+        lo, hi = col_bounds(cursor)
+        rel = cursor - lo
+        if rel < top_row:
+            top_row = rel
+        if rel >= top_row + visible_rows:
+            top_row = rel - visible_rows + 1
+        top_row = max(0, top_row)
+
+        for row in range(visible_rows):
+            for col, (lo_c, hi_c, x) in enumerate([(0, split - 1, left_x), (split, n - 1, right_x)]):
+                i = lo_c + top_row + row
+                if i > hi_c:
+                    continue
+                mark = "x" if i in checked else " "
+                attr = _cp(colors_ok, 4) | curses.A_BOLD if i == cursor else 0
+                marker = "❯ " if i == cursor else "  "
+                num = f"{i + 1:>{digit_width}}"
+                label = labels[i][:max(4, col_w - digit_width - 14)]
+                line = f"{marker}{num}  {label}"
+                _safe_addstr(stdscr, list_top + row, x, line.ljust(col_w), attr)
+                mark_attr = _cp(colors_ok, 2) if mark == "x" else 0
+                _safe_addstr(stdscr, list_top + row, x + col_w - 4, f"[{mark}]", mark_attr | (attr if i == cursor else 0))
+
+        y = list_top + visible_rows + 1
+        summary_attr = _cp(colors_ok, 2) if checked else 0
+        for line in footer_selected_lines:
+            _safe_addstr(stdscr, y, 0, line, summary_attr)
+            y += 1
+        y += 1
+        _safe_addstr(stdscr, min(y, max_y - 1), 0, bottom_bar[:max(0, max_x - 1)])
+
+        if buffer:
+            goto_y = min(y, max_y - 1)
+            goto_text = f"Go to #: {buffer}"
+            _safe_addstr(stdscr, goto_y, 0, goto_text, curses.A_BOLD)
+            curses.curs_set(1)
+            with contextlib.suppress(curses.error):
+                stdscr.move(goto_y, len(goto_text))
+        else:
+            curses.curs_set(0)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if ord("0") <= key <= ord("9"):
+            if len(buffer) < digit_width:
+                buffer += chr(key)
+                idx = int(buffer) - 1
+                if 0 <= idx < n:
+                    cursor = idx
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            buffer = buffer[:-1]
+            if buffer:
+                idx = int(buffer) - 1
+                if 0 <= idx < n:
+                    cursor = idx
+            continue
+        if key in ENTER_KEYS:
+            if buffer:
+                idx = int(buffer) - 1
+                buffer = ""
+                if 0 <= idx < n:
+                    cursor = idx
+                    checked.symmetric_difference_update({idx})
+                continue
+            return checked
+        if key in (27, ord("q"), ord("Q")):
+            if buffer:
+                buffer = ""
+                continue
+            raise _Cancelled()
+        buffer = ""
+        if key == ord("\t"):
+            other_lo, other_hi = col_bounds(split if cursor < split else 0)
+            cursor = min(other_lo + rel, other_hi)
+        elif key in (curses.KEY_UP, ord("k")):
+            lo, hi = col_bounds(cursor)
+            cursor = lo + (cursor - lo - 1) % (hi - lo + 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            lo, hi = col_bounds(cursor)
+            cursor = lo + (cursor - lo + 1) % (hi - lo + 1)
+        elif key in (curses.KEY_LEFT,) and cursor >= split:
+            cursor -= split
+        elif key in (curses.KEY_RIGHT,) and cursor < split:
+            cursor = min(cursor + split, n - 1)
+        elif key == ord(" "):
+            checked.symmetric_difference_update({cursor})
+        elif key in (ord("a"), ord("A")):
+            checked = set(range(n))
         elif key in (ord("n"), ord("N")):
             checked = set()
 
@@ -735,7 +1027,12 @@ def _review_one_item(
         else:
             max_y, max_x = stdscr.getmaxyx()
             prompt_y = min(menu_y + len(_ACTIONS) + 2, max_y - 1)
-            typed = _text_input(stdscr, prompt_y, f"New value for {field} (current: {item.get(field)!r}): ")
+            current_value = item.get(field) or ""
+            typed = _text_input(
+                stdscr, prompt_y,
+                f"Edit {field} (←/→ move, Backspace/Delete remove, Enter save, Esc cancel):",
+                initial=str(current_value),
+            )
             if typed is None:
                 continue
             new_value = typed
@@ -794,37 +1091,241 @@ def output_picker(current: dict[str, bool], filenames: dict[str, str]) -> dict[s
         return None
 
 
+def _init_colors() -> bool:
+    """Turn color on if this terminal supports it. Everything colored
+    below is drawn through _cp(), which falls back to a plain attribute
+    (or nothing) when this returns False -- color is a nice-to-have layered
+    on top of a screen that already works without it (a monochrome
+    terminal, or one where curses.start_color() itself fails), never a
+    requirement for the Outputs picker to function."""
+    if not curses.has_colors():
+        return False
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)                    # section headers
+        curses.init_pair(2, curses.COLOR_GREEN, -1)                   # included artifact
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)                  # type badges / "Recommended"
+        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)    # highlighted preset row
+        curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_GREEN)   # preview summary banner
+        curses.init_pair(6, curses.COLOR_RED, -1)                     # skipped artifact
+        return True
+    except curses.error:
+        return False
+
+
+def _cp(colors_ok: bool, n: int, fallback: int = 0) -> int:
+    return curses.color_pair(n) if colors_ok else fallback
+
+
+def _artifact_cards(filenames: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    """(key, title, type badge, one-line description) for all four
+    artifacts this tool can produce, in the fixed display order used
+    throughout the Outputs step -- the two always-on ones (benchmark
+    description, review report) alongside the two real OUTPUT_ITEM_INFO
+    toggles, so the info panel always shows the complete picture regardless
+    of what's currently selected."""
+    return [
+        ("description", "Benchmark description", "JSON-LD",
+         "Machine-readable semantic description of the benchmark and execution metadata."),
+        ("dataset", OUTPUT_ITEM_INFO["dataset"][0], "JSON-LD", OUTPUT_ITEM_INFO["dataset"][1]),
+        ("snakefile", OUTPUT_ITEM_INFO["snakefile"][0], "Snakefile", OUTPUT_ITEM_INFO["snakefile"][1]),
+        ("review", "Review report", "Markdown",
+         "Human-readable summary of semantic inference and review decisions."),
+    ]
+
+
+def _draw_cards(stdscr, y0: int, cards: list[tuple[str, str, str, str]], colors_ok: bool) -> int:
+    """Draws the "what will be produced" info panel: an intro line, then
+    the artifact cards laid out in as many columns as the terminal is wide
+    enough for (4 down to 1 as the terminal narrows), each showing its
+    name, file-type badge, and a short description. Returns the row just
+    below the panel, for whatever's drawn next."""
+    _safe_addstr(stdscr, y0, 0, "What will be produced?", curses.A_BOLD | _cp(colors_ok, 1))
+    y0 += 1
+    _safe_addstr(
+        stdscr, y0, 0,
+        "benchmantic analyzes your simulation benchmark and can generate these artifacts:",
+    )
+    y0 += 2
+
+    max_y, max_x = stdscr.getmaxyx()
+    min_card_w = 26
+    cols = max(1, min(len(cards), (max_x + 2) // (min_card_w + 2)))
+    card_w = max(min_card_w, (max_x - (cols - 1) * 2) // cols)
+
+    y = y0
+    for row_start in range(0, len(cards), cols):
+        row = cards[row_start:row_start + cols]
+        wrapped = [_wrap_text(desc, max(10, card_w - 1))[:2] for _, _, _, desc in row]
+        body_h = max((len(w) for w in wrapped), default=1)
+        for i, (_key, title, badge, _desc) in enumerate(row):
+            x = i * (card_w + 2)
+            if y >= max_y or x >= max_x:
+                continue
+            _safe_addstr(stdscr, y, x, title[:card_w], curses.A_BOLD)
+            _safe_addstr(stdscr, y + 1, x, f"[{badge}]", _cp(colors_ok, 3))
+            for li, line in enumerate(wrapped[i]):
+                _safe_addstr(stdscr, y + 2 + li, x, line)
+        y += 2 + body_h + 1
+    return y
+
+
+def _draw_section_rule(stdscr, y: int, label: str, note: str) -> None:
+    """A single "- Label ------------------- right-aligned note" divider
+    line, filling the space between with dashes -- marks the start of the
+    "Choose outputs" section the same way a rule under a heading would."""
+    max_y, max_x = stdscr.getmaxyx()
+    prefix = f"- {label} "
+    _safe_addstr(stdscr, y, 0, prefix, curses.A_BOLD)
+    note_x = max(len(prefix), max_x - len(note) - 1)
+    if note_x > len(prefix):
+        _safe_addstr(stdscr, y, len(prefix), "-" * (note_x - len(prefix)))
+    _safe_addstr(stdscr, y, note_x, note)
+
+
+def _output_two_pane(
+    stdscr, y0: int, preset_names: list[str], filenames: dict[str, str], colors_ok: bool, header,
+) -> int | None:
+    """The live two-pane Outputs picker: a preset list on the left, and a
+    file-by-file preview of whatever preset is currently highlighted on
+    the right, updating with every arrow keypress -- so what Enter is
+    about to confirm is always visible before it's pressed, rather than a
+    separate plain-text "Generate these files? [Y/n]" prompt after the
+    fact (metadata.builder skips that follow-up prompt entirely once this
+    screen has returned a selection, for exactly that reason).
+
+    Same controls as every other menu in this module: ↑/↓ (or j/k) or a
+    digit 1-9 moves the highlight, Enter confirms whatever's highlighted,
+    q/Escape cancels.
+    """
+    cursor = 0
+    top = 0
+    preview_rows = [
+        ("description", "Benchmark description"),
+        ("dataset", "Dataset description"),
+        ("snakefile", "Reproducible workflow"),
+        ("review", "Review report"),
+    ]
+    while True:
+        stdscr.erase()
+        header()
+        max_y, max_x = stdscr.getmaxyx()
+        left_w = max(28, min(48, (max_x - 3) * 2 // 5))
+        right_x = left_w + 3
+        right_w = max(20, max_x - right_x)
+
+        rows_per_preset = 2
+        avail_rows = max(rows_per_preset, max_y - y0 - 3)
+        visible_n = max(1, avail_rows // rows_per_preset)
+        if cursor < top:
+            top = cursor
+        if cursor >= top + visible_n:
+            top = cursor - visible_n + 1
+        top = max(0, min(top, max(0, len(preset_names) - visible_n)))
+
+        # ---- left: preset list ----
+        y = y0
+        for i in range(top, min(len(preset_names), top + visible_n)):
+            name = preset_names[i]
+            selected = i == cursor
+            label = f"{'> ' if selected else '  '}{i + 1}) {name}"
+            if name == "Standard":
+                label += "  [Recommended]"
+            attr = (_cp(colors_ok, 4) | curses.A_BOLD) if selected else 0
+            _safe_addstr(stdscr, y, 0, label[:left_w].ljust(left_w) if selected else label[:left_w], attr)
+            y += 1
+            desc = OUTPUT_PRESET_INFO.get(name, "")
+            _safe_addstr(stdscr, y, 4, desc[:max(0, left_w - 4)])
+            y += 1
+        if top + visible_n < len(preset_names):
+            _safe_addstr(stdscr, y, 0, "(more below)", curses.A_DIM)
+        elif top > 0:
+            _safe_addstr(stdscr, y0 - 1, left_w + 3, "")  # no-op, kept for symmetry
+
+        # ---- right: live preview of the highlighted preset ----
+        preset_name = preset_names[cursor]
+        selection = OUTPUT_PRESETS.get(preset_name)  # None for "Custom"
+        ry = y0
+        _safe_addstr(stdscr, ry, right_x, f"Preset preview: {preset_name}"[:right_w], curses.A_BOLD)
+        ry += 2
+        if selection is None:
+            for line in _wrap_text(OUTPUT_PRESET_INFO.get("Custom", ""), max(10, right_w - 1)):
+                _safe_addstr(stdscr, ry, right_x, line)
+                ry += 1
+        else:
+            _safe_addstr(stdscr, ry, right_x, "Artifact".ljust(24) + "Filename", curses.A_UNDERLINE)
+            ry += 1
+            for key, label in preview_rows:
+                included = selection.get("description", True) if key == "review" else selection.get(key, True)
+                mark = "✓" if included else "✗"
+                fname = filenames.get(key, "") if included else "(skipped)"
+                _safe_addstr(stdscr, ry, right_x, mark, _cp(colors_ok, 2 if included else 6, curses.A_BOLD))
+                _safe_addstr(stdscr, ry, right_x + 2, (label.ljust(24) + fname)[:max(0, right_w - 2)])
+                ry += 1
+            ry += 1
+            summary_attr = _cp(colors_ok, 5)
+            for line in _wrap_text(OUTPUT_PRESET_INFO.get(preset_name, ""), max(10, right_w - 2)):
+                _safe_addstr(stdscr, ry, right_x, f" {line}".ljust(right_w), summary_attr)
+                ry += 1
+
+        # ---- footer ----
+        footer_y = max_y - 2
+        _safe_addstr(stdscr, footer_y, 0, "-" * max(0, max_x - 1))
+        left_help = "↑/↓ Navigate   Enter to confirm   q to cancel"
+        right_help = "Need help? Run benchmantic --help"
+        _safe_addstr(stdscr, footer_y + 1, 0, left_help)
+        _safe_addstr(stdscr, footer_y + 1, max(0, max_x - len(right_help) - 1), right_help)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (curses.KEY_UP, ord("k")):
+            cursor = (cursor - 1) % len(preset_names)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            cursor = (cursor + 1) % len(preset_names)
+        elif ord("1") <= key <= ord("9") and (key - ord("1")) < len(preset_names):
+            cursor = key - ord("1")
+        elif key in ENTER_KEYS:
+            return cursor
+        elif key in (27, ord("q"), ord("Q")):
+            return None
+
+
 def _output_picker_impl(stdscr, current: dict[str, bool], filenames: dict[str, str]) -> dict[str, bool]:
     curses.curs_set(0)
     stdscr.keypad(True)
+    colors_ok = _init_colors()
+    cards = _artifact_cards(filenames)
 
-    # Drawn via a function, not inline, so _select_menu_with_details can
-    # call it again on every one of its own redraw frames (see its
-    # docstring) -- this keeps the artifact list visible above the preset
-    # menu on every keystroke, including right after a terminal resize,
-    # instead of it only being drawn once and then getting erased (or
-    # ghosted over) the first time the menu redraws.
+    # Drawn via a function, not inline, so both the two-pane layout and
+    # _select_menu_with_details' own fallback can call it again on every
+    # redraw frame -- this keeps the artifact-card panel visible on every
+    # keystroke, including right after a terminal resize, instead of it
+    # only being drawn once and then getting erased (or ghosted over) the
+    # first time the menu below it redraws.
     def draw_header() -> int:
-        _safe_addstr(stdscr, 0, 0, "benchmantic can produce the following artifacts:", curses.A_BOLD)
-        y = 2
-        _safe_addstr(stdscr, y, 0, "  Benchmark description  (always generated)")
-        y += 1
-        _safe_addstr(stdscr, y, 0, "  Review report          (always generated)")
-        y += 1
-        for key, (name, desc) in OUTPUT_ITEM_INFO.items():
-            mark = "x" if current.get(key) else " "
-            _safe_addstr(stdscr, y, 0, f"  [{mark}] {name}  ({filenames.get(key, '')})")
-            y += 1
-        return y
+        y = _draw_cards(stdscr, 0, cards, colors_ok)
+        _draw_section_rule(stdscr, y, "Choose outputs", "Select one or more outputs to generate")
+        return y + 1
 
     y = draw_header()
     stdscr.refresh()
+    max_y, max_x = stdscr.getmaxyx()
 
     preset_names = list(OUTPUT_PRESETS) + ["Custom"]
-    preset_details = [OUTPUT_PRESET_INFO.get(name, "") for name in preset_names]
-    choice = _select_menu_with_details(
-        stdscr, y + 2, "? Choose outputs", preset_names, preset_details, header=draw_header,
-    )
+    # The live two-pane layout (preset list + per-file preview side by
+    # side, matching the mockup this screen is modeled on) needs real
+    # width and height to not feel cramped -- on anything narrower/
+    # shorter, fall back to the single-column stacked menu instead of
+    # squeezing two columns into a terminal that can't comfortably fit
+    # them; the same card header is still shown above either way.
+    if max_x >= 92 and max_y - y >= 4 + 2 * len(preset_names):
+        choice = _output_two_pane(stdscr, y, preset_names, filenames, colors_ok, draw_header)
+    else:
+        preset_details = [OUTPUT_PRESET_INFO.get(name, "") for name in preset_names]
+        choice = _select_menu_with_details(
+            stdscr, y, "? Choose outputs", preset_names, preset_details, header=draw_header,
+        )
     if choice is None:
         raise _Cancelled()
     if preset_names[choice] != "Custom":
@@ -838,4 +1339,8 @@ def _output_picker_impl(stdscr, current: dict[str, bool], filenames: dict[str, s
         "Benchmark description and review report are always generated -- these are the rest.",
         labels, checked,
     )
-    return {k: (i in result) for i, k in enumerate(keys)}
+    # Custom never turns "description" off -- see OUTPUT_PRESETS' comment
+    # above for why that's only reachable via the "Workflow only" preset.
+    selection = {k: (i in result) for i, k in enumerate(keys)}
+    selection["description"] = True
+    return selection

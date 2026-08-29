@@ -101,6 +101,18 @@ def main(argv: list[str] | None = None) -> None:
     config.check_required(build_args, describe_benchmark.REQUIRED_FLAGS)
     benchmark_path, dataset_path, snakefile_path = describe_benchmark.run(build_args)
 
+    if benchmark_path is None:
+        # Snakefile-only mode (--outputs snakefile-only / the "Snakefile
+        # only" interactive preset) -- describe_benchmark.py generated only
+        # a Snakefile, with no benchmark.jsonld to feed show_description.py
+        # or verify_description.py, so there's nothing left for this script
+        # to chain into.
+        print(
+            "\n(Snakefile-only mode: no benchmark.jsonld was generated, so show_description and "
+            "verify_description are skipped -- only outputs/<software-name>/Snakefile was produced.)"
+        )
+        sys.exit(0)
+
     if not extra_args.skip_show:
         print("\n=== show_description ===")
         show_argv = [str(benchmark_path)]

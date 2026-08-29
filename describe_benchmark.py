@@ -17,7 +17,7 @@ into outputs/<software-name>/, matching this pattern from run-benchmark.yml:
         --benchmark-file <benchmark-filename> \\
         --result-path ./results
 
-Produces:
+Produces (depends on the Outputs step / --outputs -- see metadata.builder):
     outputs/<software-name>/<benchmark-filename>  -- metadata.builder's
                                                        RO-Crate JSON-LD
                                                        (parameters, metrics,
@@ -34,6 +34,22 @@ Produces:
     outputs/<software-name>/Snakefile              -- snakefile.generator's
                                                        Snakefile, as a plain
                                                        file (not zipped)
+    outputs/<software-name>/review.md              -- show_description.py's
+                                                       human-readable table
+
+With --outputs snakefile-only (or the "Workflow only" interactive preset),
+ONLY outputs/<software-name>/Snakefile (plus its per-case parameters.json
+previews) is produced -- no benchmark.jsonld, no dataset sidecar, no
+review.md. This mode skips semantic inference (no Groq/OpenAI call, no
+GROQ_API_KEY/OPENAI_API_KEY required) entirely, deriving each parameter's
+value straight from params.input via static discovery. The one real cost:
+none of the parameters get a unit-inferred name, and NO parameter gets the
+usual bracketed unit-suffix on its parameters.json key (e.g. "Grid.Radial0"
+stays "Grid.Radial0", never "Grid.Radial0[m]") -- if the actual
+run_benchmark.py your container runs expects a unit-suffixed key for a
+parameter whose real-world unit is meters or pascals, that key won't match
+at runtime. See README.md's "Config files" section before relying on this
+mode for a benchmark with meter/pascal-valued parameters.
 
 Not tied to any one simulation tool: <module_dir> just needs to be
 something metadata.builder can already handle (a DUNE/DuMux-style module
@@ -262,12 +278,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "account.")
     meta.add_argument("--skip-validation", action="store_true")
     meta.add_argument("--outputs", type=str, default=None,
-                       help="Which artifacts to generate, beyond the always-generated benchmark "
-                            "description and review report: a preset ('standard' -- dataset+snakefile, "
-                            "the default; 'snakefile' -- snakefile only; 'dataset' -- dataset only; "
-                            "'description-only'/'none' -- neither), or an explicit comma-separated "
-                            "list of 'dataset','snakefile'. Default: reuse the module's saved "
-                            "selection, prompting interactively the first time (real terminal only).")
+                       help="Which artifacts to generate. Presets: 'standard' -- benchmark description + "
+                            "review report + dataset + snakefile (the default); 'snakefile' -- description "
+                            "+ review report + snakefile, no dataset; 'snakefile-only' -- ONLY a Snakefile, "
+                            "built from statically-discovered parameter values, with NO semantic inference "
+                            "(no Groq/OpenAI call), no benchmark.jsonld, no dataset sidecar, no review "
+                            "report -- see this script's module docstring for the parameters.json "
+                            "unit-suffix limitation this mode carries; 'dataset' -- description + review "
+                            "report + dataset, no snakefile; 'description-only'/'none' -- description + "
+                            "review report only. Or an explicit comma-separated list of 'dataset','snakefile' "
+                            "(description stays on; 'snakefile-only' is the only way to turn it off). "
+                            "Default: reuse the module's saved selection, prompting interactively the "
+                            "first time (real terminal only).")
 
     # --- snakefile.generator pass-through ---
     snake = ap.add_argument_group("snakefile.generator options")
@@ -330,14 +352,20 @@ def _print_intro() -> None:
         print()
 
 
-def run(args: argparse.Namespace) -> tuple[Path, Path | None, Path | None]:
+def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None]:
     """Run the full build (semantic description, plus whichever of the
     dataset sidecar / Snakefile / review report were selected in the
     Outputs step -- see metadata.builder's _resolve_outputs_selection()).
-    Returns (benchmark_path, dataset_path, snakefile_path); the latter two
-    are None if that artifact wasn't generated this run. Callers (e.g.
-    workflow.py) only strictly need benchmark_path -- it's always
-    generated -- to chain into show_description.py/verify_description.py.
+    Returns (benchmark_path, dataset_path, snakefile_path); any of the
+    three is None if that artifact wasn't generated this run. In
+    particular, benchmark_path IS allowed to be None -- this happens when
+    the resolved Outputs selection has "description": False (the
+    "snakefile-only" preset/--outputs value): no benchmark.jsonld, dataset
+    sidecar, or review report is generated at all in that mode, only the
+    Snakefile. Callers (e.g. workflow.py) that chain into
+    show_description.py/verify_description.py using benchmark_path MUST
+    check for None first and skip that chain instead of passing None
+    through.
     """
     needs_interactive = args.scenario_params is None or not args.skip_review
     if needs_interactive and not (args.verbose or args.debug):
@@ -414,9 +442,71 @@ def run(args: argparse.Namespace) -> tuple[Path, Path | None, Path | None]:
 
     staged_by_id = load_graph(staged_benchmark)
     software_name = args.software_name or generator.derive_software_name(staged_by_id)
+    output_dir = Path("outputs") / software_name
+
+    # Which artifacts this run actually produces -- resolved by
+    # metadata.builder's Outputs step and handed back via `stats["outputs"]`
+    # (a plain dict of {"description": bool, "dataset": bool, "snakefile":
+    # bool}). Falls back to "everything" if build() didn't return stats for
+    # some reason (shouldn't happen on a successful run, but keeps this
+    # defensive rather than crashing on a missing key).
+    outputs = stats.get("outputs") or dict(builder.DEFAULT_OUTPUTS)
+
+    if not outputs.get("description", True):
+        # Snakefile-only mode: metadata.builder already skipped semantic
+        # inference and wrote only a minimal, non-deliverable staging graph
+        # to `staged_benchmark` (see its _generate_snakefile_only()) -- it's
+        # used directly as snakefile.generator's input below and is NEVER
+        # moved/renamed into output_dir as a "<name>_benchmark.jsonld"; no
+        # dataset sidecar or review.md is produced either. See run()'s
+        # docstring for why benchmark_path/dataset_path come back None.
+        print(
+            "\nSnakefile-only mode: skipping semantic inference (no Groq/OpenAI call), the "
+            "benchmark description, and the review report. Parameters use bare parameters.json "
+            "keys since units aren't inferred in this mode -- see README.md's Config files "
+            "section if any selected parameter's real unit is meters or pascals."
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        workdir = output_dir / ".generate_snakefile_workdir"
+        generator_args = argparse.Namespace(
+            metadata_jsonld=staged_benchmark,
+            container_image=args.container_image,
+            container_shared_dir=args.container_shared_dir,
+            software_name=software_name,
+            executable=args.executable,
+            build_dir=args.build_dir,
+            results_subdir=args.results_subdir,
+            name_flag=args.name_flag,
+            zip_name_flag=args.zip_name_flag,
+            exclude_flag=args.exclude_flag,
+            mesh_split=args.mesh_split,
+            radial_cells_flag=args.radial_cells_flag,
+            angular_cells_flag=args.angular_cells_flag,
+            grading_flag=args.grading_flag,
+            inner_radius_flag=args.inner_radius_flag,
+            outer_radius_flag=args.outer_radius_flag,
+            outer_radius=args.outer_radius,
+            unit_symbol=args.unit_symbol,
+            output_dir=workdir,
+            zip=None,
+        )
+        run_step("Generating Snakefile", args.verbose or args.debug, generator.generate, generator_args)
+        snakefile_path = output_dir / "Snakefile"
+        shutil.move(str(workdir / "Snakefile"), str(snakefile_path))
+        shutil.rmtree(workdir, ignore_errors=True)
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+        benchmark_label = (staged_by_id.get("./") or {}).get("name") or software_name
+        run_cmd = (
+            f"# Snakefile-only mode produced no benchmark.jsonld / run_benchmark.py isn't usable here.\n"
+            f"# Run the Snakefile directly (see README.md), or rerun with a different --outputs preset "
+            f"for a full benchmark.jsonld + run_benchmark.py path."
+        )
+        _print_summary_box(benchmark_label, stats, output_dir, [snakefile_path], run_cmd)
+        return None, None, snakefile_path
+
     benchmark_filename = args.benchmark_filename or derive_benchmark_filename(staged_by_id)
     dataset_filename = args.dataset_filename or derive_dataset_filename(staged_by_id)
-    output_dir = Path("outputs") / software_name
     if args.verbose or args.debug:
         print(f"-> Software: {software_name!r} (output directory: {output_dir}/)")
         if not args.benchmark_filename:
@@ -429,15 +519,6 @@ def run(args: argparse.Namespace) -> tuple[Path, Path | None, Path | None]:
     dataset_path: Path | None = None
 
     shutil.move(str(staged_benchmark), str(benchmark_path))
-
-    # Which of the optional artifacts (beyond the benchmark description
-    # and the review report -- both always generated) this run actually
-    # produces -- resolved by metadata.builder's Outputs step and handed
-    # back via `stats["outputs"]` (a plain dict of {"dataset": bool,
-    # "snakefile": bool}). Falls back to "everything" if build() didn't
-    # return stats for some reason (shouldn't happen on a successful run,
-    # but keeps this defensive rather than crashing on a missing key).
-    outputs = stats.get("outputs") or dict(builder.DEFAULT_OUTPUTS)
 
     # Dataset sidecar (author, publisher, software dependencies -- see
     # metadata.builder.GraphBuilder.build_dataset_graph()) -- written by

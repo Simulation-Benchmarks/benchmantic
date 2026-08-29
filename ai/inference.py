@@ -362,30 +362,96 @@ def _is_hard_payload_limit(exc: OpenAIError) -> bool:
     return isinstance(body, dict) and body.get("error", {}).get("code") == "request_too_large"
 
 
-#: Groq's rate_limit_exceeded message often names the actual wait, e.g.
-#: "...Limit 12000, Used 9524, Requested 4941. Please try again in
-#: 12.325s." -- far more precise than any flat guess, since it reflects
-#: exactly how much of the current per-minute window is left.
-_RETRY_AFTER_MESSAGE_PATTERN = re.compile(r"try again in\s+([\d.]+)\s*s\b", re.IGNORECASE)
+#: Groq's rate_limit_exceeded message names the actual wait, but NOT always
+#: as a bare "12.325s" -- once the wait is more than a minute (routine for a
+#: daily-quota message; see _DAILY_LIMIT_PATTERN below) it switches to a
+#: compound "33m47.808s" or "1h12m45.79s" form instead, with no space
+#: between the h/m/s components. Each component is optional on its own
+#: (a sub-minute wait is just "12.325s", no "m"/"h" at all), so every piece
+#: is captured separately and combined below rather than assuming seconds
+#: is always the only or the last-in-message number.
+_RETRY_AFTER_MESSAGE_PATTERN = re.compile(
+    r"try again in\s+(?:([\d.]+)\s*h)?\s*(?:([\d.]+)\s*m(?!s))?\s*(?:([\d.]+)\s*s)?", re.IGNORECASE,
+)
+
+#: Groq's daily-quota message reads "...on tokens per day (TPD): Limit
+#: 100000, Used 99619, Requested 2728. Please try again in 33m47.808s.".
+#: This is a fundamentally different kind of limit from the per-minute (TPM)
+#: budget the rest of this module is built around: it doesn't reset on its
+#: own within a single interactive run (the wait is routinely 10s of
+#: minutes to multiple hours, not the ~60s a TPM window needs), so treating
+#: it like any other rate_limit_exceeded and retrying with a short backoff
+#: -- as this code used to, before this pattern was recognized at all --
+#: just burns through `retries` attempts that are all guaranteed to fail
+#: identically, while also misreporting the wait as "the provider's
+#: per-minute budget" resetting soon when it's actually a day-scale quota.
+_DAILY_LIMIT_PATTERN = re.compile(r"tokens per day\s*\(TPD\)", re.IGNORECASE)
+
+
+def _parse_message_wait_seconds(message: str) -> float | None:
+    """Parse Groq's "please try again in ..." wait, in either its plain
+    "12.325s" form or its compound "33m47.808s" / "1h12m45.79s" form --
+    returns None if the message has no such phrase at all (a small safety
+    margin is added on top of whatever's parsed, since it's a lower bound
+    on the provider's own countdown, not a guarantee).
+    """
+    m = _RETRY_AFTER_MESSAGE_PATTERN.search(message or "")
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = (float(g) if g else 0.0 for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds + 1.0
+
+
+def _format_wait(seconds: float) -> str:
+    """"4059.8" -> "1h 7m 40s" -- for a human-readable wait in an error
+    message; drops leading zero components (a 47s wait reads as "47s", not
+    "0h 0m 47s")."""
+    total = max(0, round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def _is_daily_limit(exc: OpenAIError) -> float | None:
+    """If `exc` is Groq's tokens-per-day (TPD) quota being exhausted,
+    returns how many seconds the message says to wait (falling back to a
+    generic non-zero placeholder if that couldn't be parsed) -- otherwise
+    None. See _DAILY_LIMIT_PATTERN above for why this needs its own
+    fail-fast path rather than going through the normal short-backoff
+    retry that per-minute (TPM) limits use.
+    """
+    body = getattr(exc, "body", None)
+    message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    if not _DAILY_LIMIT_PATTERN.search(message or ""):
+        return None
+    return _parse_message_wait_seconds(message) or RATE_LIMIT_BACKOFF_SECONDS
 
 
 def _rate_limit_wait_seconds(exc: OpenAIError) -> float:
     """Pick how long to wait before retrying `exc`, preferring the most
     precise source available:
       1. A wait time embedded in the error message itself (Groq's
-         rate_limit_exceeded messages usually include one) -- a small
-         safety margin is added since it's a lower bound, not a guarantee.
+         rate_limit_exceeded messages usually include one, in either the
+         plain or compound h/m/s form -- see _parse_message_wait_seconds).
       2. A Retry-After response header, if the provider sent one.
       3. RATE_LIMIT_BACKOFF_SECONDS, as a last-resort flat guess.
+
+    Only meant for waits actually worth sleeping through inline (a
+    per-minute budget resetting) -- a daily quota's much longer wait is
+    caught separately by _is_daily_limit() and fails fast instead of
+    reaching this function's caller at all.
     """
     body = getattr(exc, "body", None)
     message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
-    m = _RETRY_AFTER_MESSAGE_PATTERN.search(message or "")
-    if m:
-        try:
-            return max(float(m.group(1)) + 1.0, 1.0)
-        except ValueError:
-            pass
+    parsed = _parse_message_wait_seconds(message)
+    if parsed is not None:
+        return parsed
 
     response = getattr(exc, "response", None)
     header = getattr(response, "headers", None)
@@ -531,6 +597,31 @@ def _query_llm_json_array(
                     f"reduces completion size, though the source text itself is the bigger cost here.\n"
                     f"  curl -s {PROVIDER_CONFIG[provider]['base_url']}/models "
                     f"-H \"Authorization: Bearer ${PROVIDER_CONFIG[provider]['api_key_env']}\" | python3 -m json.tool"
+                ) from exc
+            daily_wait = _is_daily_limit(exc)
+            if daily_wait is not None:
+                # A tokens-per-day quota, not the per-minute budget the
+                # rest of this loop's retries assume -- see
+                # _DAILY_LIMIT_PATTERN above. The wait is routinely 10s of
+                # minutes to multiple hours, nothing a retry loop inside
+                # one run should sit through blindly (and the account-wide
+                # quota is shared across every model, so switching --model
+                # on the same provider/account doesn't route around it the
+                # way it does for the per-minute over_limit case above).
+                # Fail fast with the actual wait instead of retrying with
+                # the wrong (much shorter) backoff and misreporting this as
+                # a per-minute limit resetting soon.
+                raise RuntimeError(
+                    f"'{resolved_model}' on {provider} has hit its account-wide tokens-per-day quota -- "
+                    f"not a per-minute rate limit, so short retries can't fix it; the provider says to try "
+                    f"again in {_format_wait(daily_wait)}. Options:\n"
+                    f"  - Wait for the daily quota to reset (see the exact time in the error below), then "
+                    f"re-run the same command -- already-cached parameters/metrics won't be re-queried.\n"
+                    f"  - Pass --provider openai (with OPENAI_API_KEY set) to use a different account's quota "
+                    f"for the rest of this run.\n"
+                    f"  - Pass --fallback-on-error to fill any still-uninferred items with a low-confidence "
+                    f"placeholder instead of stopping the run, and fix them by hand in review.\n"
+                    f"  Original error: {exc}"
                 ) from exc
             if _is_hard_payload_limit(exc):
                 # A flat request-body-size cap, not a time-windowed budget --
