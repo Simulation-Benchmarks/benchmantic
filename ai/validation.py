@@ -357,6 +357,37 @@ def _strip_hedging(text: str | None) -> str:
     return cleaned
 
 
+def _synthesize_explanation(item: dict, label: str) -> str:
+    """Build a short placeholder explanation from an item's OWN already-
+    inferred fields (semantic_name/unit/quantityKind), for when the model's
+    JSON response omitted "explanation" entirely -- a different situation
+    from _strip_hedging()'s (an explanation that WAS present but got
+    reduced to nothing): here there was never any text to begin with, so
+    there's nothing to recover, only something reasonable to synthesize so
+    the review screen never shows a blank field with no clue why. Distinct
+    models vary in how reliably they include every requested field per
+    item, especially past the first few items in a longer batch -- this
+    keeps a missing field from looking like the same "empty explanation"
+    display bug reported earlier (see _strip_hedging()'s docstring), which
+    it structurally isn't.
+    """
+    name = item.get("semantic_name") or item.get("key") or "this item"
+    unit = item.get("unit")
+    quantity_kind = item.get("quantityKind")
+    detail = ""
+    if unit and quantity_kind:
+        detail = f" It was inferred to have unit {unit!r} and quantity kind {quantity_kind!r}."
+    elif unit:
+        detail = f" It was inferred to have unit {unit!r}."
+    elif quantity_kind:
+        detail = f" It was inferred to have quantity kind {quantity_kind!r}."
+    kind = f"{label} " if label else ""
+    return (
+        f"No explanation was returned by the model for this {kind}({name!r}).{detail} "
+        f"Please verify and edit this field by hand."
+    )
+
+
 def _fix_unit_quantitykind_confusion(item: dict, label: str = "") -> None:
     """Safety net for a recurring LLM mistake: writing a quantityKind URI
     (e.g. 'http://qudt.org/vocab/quantitykind/Length') into the "unit"
@@ -510,6 +541,17 @@ def validate_metadata(
         item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="parameter")
         _backfill_missing_quantitykind(item, label="parameter")
+        if not item["explanation"].strip():
+            # The model's JSON simply didn't include this field for this
+            # item -- happens more often deeper into a longer batch, and
+            # with some fallback models more than others (see
+            # ai.inference's automatic model-fallback feature). Synthesize
+            # something from the item's own already-inferred fields
+            # (computed AFTER the two backfills above, so it can mention a
+            # backfilled quantityKind too) rather than leave the review
+            # screen showing a blank field with no clue why.
+            item["explanation"] = _synthesize_explanation(item, label="parameter")
+            item.setdefault("_needs_verification", "Model omitted the explanation for this item -- a placeholder was generated; please verify.")
         validated.append(item)
 
     if candidates is not None:
@@ -614,6 +656,10 @@ def validate_metric_metadata(
         item["explanation"] = _strip_hedging(item["explanation"])
         _fix_unit_quantitykind_confusion(item, label="metric")
         _backfill_missing_quantitykind(item, label="metric")
+        if not item["explanation"].strip():
+            # See the matching comment in validate_metadata() above.
+            item["explanation"] = _synthesize_explanation(item, label="metric")
+            item.setdefault("_needs_verification", "Model omitted the explanation for this item -- a placeholder was generated; please verify.")
         validated.append(item)
 
     if candidates is not None:

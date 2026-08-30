@@ -1057,6 +1057,16 @@ def _review_one_item(
         # detail rows (they're re-read from `item` on every redraw), so
         # nothing about the edit is actually lost by not blocking here.
         curses.napms(500)
+        # After a successful edit, land back on "Accept" rather than
+        # staying on the action just used -- the common flow is "fix the
+        # one thing that was wrong, then accept and move to the next
+        # item", so that's the more useful default to highlight next,
+        # not a re-run of the same edit. (A CANCELLED edit -- the `continue`
+        # branches above, for `dt_choice is None`/`typed is None` -- does
+        # NOT reach this line, so backing out of a submenu/text prompt
+        # still leaves the highlight where it was, in case the intent was
+        # just to retry the same action.)
+        action_cursor = 0
 
 
 # =============================================================================
