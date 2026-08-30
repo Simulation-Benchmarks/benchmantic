@@ -294,10 +294,25 @@ def _backfill_missing_quantitykind(item: dict, label: str = "") -> None:
 #: is unclear + "more"/"further"/"additional" context/information, not just
 #: the one literal wording -- but still anchored on "meaning is unclear" so
 #: it can't eat an unrelated sentence that happens to contain "but".
+#:
+#: The match ends right at "context"/"information" itself -- it does NOT
+#: also consume whatever punctuation or text comes after that word. An
+#: explanation is often one single sentence with the hedge clause in the
+#: MIDDLE rather than its own sentence (e.g. "..., though the exact
+#: meaning is unclear without more context, likely representing pressure
+#: L2 error." or "...without more context; the unit is unit:UNITLESS.") --
+#: a trailing `[^.!?]*[.!?]?` here would swallow everything up to the END
+#: of that whole sentence, silently deleting real content (a unit/
+#: quantityKind note, the rest of the sentence) that happened to follow
+#: the hedge rather than precede it. Leaving the trailing punctuation/text
+#: alone means whatever comma or semicolon originally joined the hedge to
+#: the next clause is still there afterward, doing the same job it always
+#: did -- connecting what's left into one clean sentence instead of two
+#: fragments glued together with no separator.
 _HEDGE_CLAUSE_PATTERN = re.compile(
     r"\s*[,;]?\s*\b(?:but|though|although|however)\b[^.!?]*?"
     r"\b(?:exact|precise)\s+meaning\s+is\s+unclear\b"
-    r"[^.!?]*?\b(?:context|information)\b[^.!?]*[.!?]?",
+    r"[^.!?]*?\b(?:context|information)\b",
     re.IGNORECASE,
 )
 
@@ -307,14 +322,38 @@ def _strip_hedging(text: str | None) -> str:
     leftover punctuation/whitespace (e.g. a dangling comma where the clause
     used to start, or a missing final period). Safe to call on empty/None
     input.
+
+    Never returns an empty (or content-free, e.g. a bare "." left over)
+    string for non-empty input. If stripping the hedge clause would leave
+    nothing usable -- the whole explanation WAS the hedge clause -- keeps
+    the original text untouched instead: a redundant hedge phrase left in
+    is a cosmetic wart the reviewer can see and fix; a silently emptied
+    "Explanation" field looks like missing data and gives the reviewer
+    nothing to go on (see the review screen's "why is explanation empty?"
+    case this was written for).
     """
     if not text:
         return text or ""
     cleaned = _HEDGE_CLAUSE_PATTERN.sub("", text)
+    # A hedge clause matched at the very start of the text (nothing before
+    # it to anchor the pattern's own leading "[,;]?") leaves a dangling
+    # comma/semicolon at the front of what's left, e.g. "though the exact
+    # meaning is unclear without more context, likely X." -> ", likely X."
+    # -- strip that stray leading punctuation same as a trailing one.
+    cleaned = re.sub(r"^[\s,;]+", "", cleaned)
     cleaned = re.sub(r"\s+([.,;!?])", r"\1", cleaned)  # "grid ," -> "grid,"
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-    if cleaned and cleaned[-1] not in ".!?":
+    # "Effectively empty" means no actual word content survived -- not just
+    # a falsy string. A hedge clause that WAS the whole sentence can leave
+    # a bare "." or "," behind (its own closing punctuation, unconsumed by
+    # the pattern above), which is exactly as useless to a reviewer as ""
+    # would be.
+    if not re.search(r"\w", cleaned):
+        return text.strip()
+    if cleaned[-1] not in ".!?":
         cleaned += "."
+    if cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
     return cleaned
 
 

@@ -115,7 +115,15 @@ def main(argv: list[str] | None = None) -> None:
 
     if not extra_args.skip_show:
         print("\n=== show_description ===")
-        show_argv = [str(benchmark_path)]
+        # --quiet: describe_benchmark.py already rendered and saved this
+        # exact review.md moments ago (silently, same reason -- see its own
+        # show_argv comment); re-printing the whole Markdown table here too
+        # was just the same wall of text a second time. This call still
+        # re-renders and re-saves the file (in case --show-output points
+        # somewhere different from the default, or this step is ever run
+        # against a benchmark.jsonld from a source other than the
+        # describe_benchmark.py call right above), just without echoing it.
+        show_argv = [str(benchmark_path), "--quiet"]
         if extra_args.show_output:
             show_argv += ["--output", str(extra_args.show_output)]
         show_description.run(show_description.build_arg_parser().parse_args(show_argv))

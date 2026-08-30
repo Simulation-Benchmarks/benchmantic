@@ -38,7 +38,7 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from openai import APIStatusError, NotFoundError, OpenAI, OpenAIError, RateLimitError
+from openai import APIStatusError, BadRequestError, NotFoundError, OpenAI, OpenAIError, RateLimitError
 
 if TYPE_CHECKING:
     from metadata.metrics import MetricCandidate
@@ -277,6 +277,153 @@ def _get_rate_limiter(provider: str, tpm_budget: int) -> _RateLimiter:
     return limiter
 
 
+# =============================================================================
+# Automatic model fallback on tokens-per-day (TPD) exhaustion
+# =============================================================================
+#
+# Groq (and, in principle, any OpenAI-compatible provider) tracks its daily
+# token quota PER MODEL, not as one account-wide pool shared across every
+# model on the key -- confirmed by Groq's own per-model rate-limit table
+# (RPM/RPD/TPM/TPD/ASH/ASD columns, one row per model) and independently by
+# this same file's PROVIDER_CONFIG comment above, which already documents
+# wildly different per-model TPM caps on the same account/tier (8K vs 70K).
+# That means a model hitting its TPD cap is a property of THAT model, not
+# the account -- so switching to a different model this key can access is a
+# genuinely different, still-full quota, not a no-op. This section makes
+# that switch automatic instead of requiring the user to notice the error,
+# pick a new --model by hand, and re-run.
+#
+# _EXHAUSTED_MODELS / _ACTIVE_MODEL are process-lifetime, per-provider state
+# (same pattern as _RATE_LIMITERS above) so a switch made for one batch's
+# parameter-inference call carries over to every later batch and to
+# metric-inference too, within the same run -- not just the one request
+# that triggered it.
+
+#: Per provider, the set of model ids this run has already exhausted the
+#: daily quota for -- never retried again automatically within this process.
+_EXHAUSTED_MODELS: dict[str, set[str]] = {}
+
+#: Per provider, the model id currently in use after an automatic fallback
+#: switch (overrides PROVIDER_CONFIG's default_model, but NOT an explicit
+#: --model the user passed -- see _query_llm_json_array).
+_ACTIVE_MODEL: dict[str, str] = {}
+
+#: Substrings that mark a model id as not a general chat-completion model
+#: (transcription, text-to-speech, moderation/guard, embeddings) -- these
+#: exist in a Groq/OpenAI /v1/models listing alongside chat models but can't
+#: serve this pipeline's chat.completions.create() calls, so automatic
+#: fallback discovery skips them. NOTE: this list is necessarily incomplete
+#: -- Groq's catalog includes TTS/voice models with no consistent naming
+#: signal at all (e.g. "canopylabs/orpheus-arabic-saudi", which contains
+#: none of these substrings and was picked automatically before this
+#: comment existed, then failed a real request with a 400
+#: "model_terms_required" every attempt). Catching that class of failure
+#: at the exception level (see _is_model_unusable() below) rather than
+#: trying to enumerate every non-chat model by name upfront is the more
+#: robust fix -- this hint list is a cheap first pass, not the real
+#: safety net.
+_NON_CHAT_MODEL_HINTS = ("whisper", "tts", "guard", "moderation", "embed", "safety", "orpheus", "canopylabs")
+
+#: Substrings marking a model as a small and/or narrowly-specialized
+#: chat model -- still usable in principle (chat.completions.create()
+#: will accept it), but a poor fit for this pipeline's actual task: pulling
+#: structured JSON metadata out of C++ source given a fairly long prompt
+#: (main.cc/problem.hh excerpts, prior corrections, several items per
+#: batch). In practice these models are far more likely to produce
+#: malformed JSON, drop required fields, or otherwise fail validation --
+#: observed directly: Groq's "allam-2-7b" (a 7B, primarily Arabic-focused
+#: instruct model) was auto-selected here purely because "allam" sorts
+#: early alphabetically, and then failed identically on all 3 attempts
+#: with the exact same JSON syntax error (deterministic at temperature=0,
+#: so retrying changed nothing). These ids are DEPRIORITIZED, not
+#: excluded outright -- if nothing else is available, one of these is
+#: still tried rather than giving up, since a low-capability model that
+#: might work beats stopping the run.
+_SMALL_OR_SPECIALIZED_MODEL_HINTS = (
+    "allam", "distil", "1b", "2b", "3b", "4b", "7b", "8b", "9b",
+)
+
+#: Known-good general-purpose Groq chat/instruct models, in preference
+#: order. Tried in this order -- first one present in the account's own
+#: client.models.list() result (and not already excluded) wins -- before
+#: falling back to the general/narrow heuristic ranking below for
+#: anything not on this list.
+#:
+#: Why a curated list on top of live discovery, not instead of it: two
+#: real failures on the same account showed pure heuristic ranking over
+#: whatever models.list() happens to return isn't reliable enough on
+#: Groq's full catalog, which mixes general chat models in with TTS,
+#: region/language-specialized, and terms-gated ones that carry no
+#: consistent naming signal to filter on ("canopylabs/orpheus-arabic-
+#: saudi" has none of _NON_CHAT_MODEL_HINTS's substrings and still isn't
+#: usable here). A short list of models known to actually work well for
+#: this pipeline's structured-JSON task is a much stronger signal than
+#: "sorts alphabetically early" or "isn't obviously small". This list is
+#: intentionally NOT exhaustive -- it doesn't need to be, since anything
+#: not on it still gets tried as a fallback, just ranked by the general/
+#: narrow heuristic instead of a known-good preference.
+_PREFERRED_MODEL_ORDER = [
+    "llama-3.3-70b-versatile",
+    "groq/compound-mini",
+    "groq/compound",
+    "openai/gpt-oss-120b",
+    "moonshotai/kimi-k2-instruct",
+    "qwen/qwen3-32b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+]
+
+
+def _discover_alternate_model(client: OpenAI, provider: str, exclude: set[str]) -> str | None:
+    """Ask the provider what models this API key can actually access
+    (GET /v1/models, exposed by the openai-python SDK as client.models.list()
+    -- works against Groq's OpenAI-compatible endpoint too) and return one
+    not in `exclude` and not an obviously non-chat model, or None if none is
+    available (models.list() itself failed, or nothing usable is left).
+
+    Selection order:
+      1. The first _PREFERRED_MODEL_ORDER entry present among the
+         remaining candidates -- a short, curated list of models already
+         known to work well for this pipeline's task (see that list's
+         comment for why discovery alone isn't reliable enough here).
+      2. Otherwise, among whatever's left: general-purpose models before
+         small/narrowly-specialized ones (_SMALL_OR_SPECIALIZED_MODEL_HINTS),
+         sorted alphabetically within each group for a deterministic,
+         reproducible choice.
+
+    Still queries live rather than ONLY using a hardcoded list -- this
+    file's own comments already note Groq model availability varies per
+    account/key, so an account with none of the preferred models (or a
+    non-Groq provider) still gets a reasonable pick instead of nothing.
+    """
+    try:
+        listing = client.models.list()
+    except OpenAIError:
+        return None
+    candidates = []
+    for entry in getattr(listing, "data", None) or []:
+        model_id = getattr(entry, "id", None)
+        if not model_id or model_id in exclude:
+            continue
+        if any(hint in model_id.lower() for hint in _NON_CHAT_MODEL_HINTS):
+            continue
+        candidates.append(model_id)
+    if not candidates:
+        return None
+
+    candidate_set = set(candidates)
+    for preferred in _PREFERRED_MODEL_ORDER:
+        if preferred in candidate_set:
+            return preferred
+
+    def is_small_or_specialized(model_id: str) -> bool:
+        return any(hint in model_id.lower() for hint in _SMALL_OR_SPECIALIZED_MODEL_HINTS)
+
+    general = sorted(m for m in candidates if not is_small_or_specialized(m))
+    narrow = sorted(m for m in candidates if is_small_or_specialized(m))
+    return (general + narrow)[0]
+
+
 def get_client(provider: str = DEFAULT_PROVIDER) -> OpenAI:
     """
     Create an OpenAI-compatible client for the given provider.
@@ -299,20 +446,67 @@ def get_client(provider: str = DEFAULT_PROVIDER) -> OpenAI:
 
 
 
+def _error_body(exc: OpenAIError) -> dict:
+    """Returns the {"message": ..., "type": ..., "code": ...} error dict
+    for `exc`, normalizing across the two shapes openai-python's client
+    code can end up handing an exception's `.body`.
+
+    The server always sends the FULL {"error": {...}} envelope, but
+    OpenAI._make_status_error() (this SDK's status-error constructor)
+    unwraps that itself before building the exception -- `data =
+    body.get("error", body) if is_mapping(body) else body` -- so by the
+    time code here ever sees `exc.body`, it's normally already the INNER
+    dict, with no "error" key one level up. Every helper below used to
+    assume the un-unwrapped shape (`body["error"]["message"]`), which
+    silently returned nothing for a real response instead of raising --
+    `.get("error")` on a dict with no "error" key just returns None, no
+    exception -- so this was never caught by normal error handling, only
+    by the symptom of daily-quota/oversized-request detection never
+    firing against a live API and every 429 falling through to the
+    generic short-backoff retry path instead, no matter what it actually
+    was. Handling BOTH shapes here (checking for a nested "error" dict
+    first, falling back to the body itself) is deliberately defensive
+    against this exact class of mistake happening again if a future SDK
+    version changes which shape it hands over.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return {}
+    inner = body.get("error")
+    return inner if isinstance(inner, dict) else body
+
+
+#: Error codes meaning "this specific model can't serve requests on this
+#: account right now, for a reason no amount of retrying (or even waiting)
+#: fixes" -- as opposed to a rate/token budget, which resolves with time.
+#: "model_terms_required" is the one actually observed (Groq's org admin
+#: hasn't accepted that model's terms yet -- see console.groq.com/
+#: playground?model=... in the error message); the other two are
+#: plausible siblings for a model pulled from an account's catalog that
+#: isn't actually invocable (retired, or temporarily disabled) -- harmless
+#: to check for even if never seen in practice, since an unmatched code
+#: just falls through to the generic retry path unchanged.
+_MODEL_UNUSABLE_CODES = {"model_terms_required", "model_not_active", "model_decommissioned"}
+
+
+def _is_model_unusable(exc: OpenAIError) -> bool:
+    return _error_body(exc).get("code") in _MODEL_UNUSABLE_CODES
+
+
 def _is_rate_or_size_limited(exc: OpenAIError) -> bool:
     """True for a 429 (RateLimitError) or Groq's 413 'request too large for
     tokens-per-minute budget' response -- both mean "the provider rejected
     this on token/rate budget grounds", not "something is wrong with the
     request itself". Groq's TPM-exceeded case comes back as a generic
     APIStatusError (413 has no dedicated openai-python exception class), so
-    it's detected via the response body's {"error": {"code":
-    "rate_limit_exceeded"}} instead of the exception type alone.
+    it's detected via the response body's {"code": "rate_limit_exceeded"}
+    instead of the exception type alone (see _error_body() for why this
+    reads `exc.body` directly rather than assuming a nested "error" key).
     """
     if isinstance(exc, RateLimitError):
         return True
     if isinstance(exc, APIStatusError):
-        body = getattr(exc, "body", None)
-        if isinstance(body, dict) and body.get("error", {}).get("code") == "rate_limit_exceeded":
+        if _error_body(exc).get("code") == "rate_limit_exceeded":
             return True
         if exc.status_code == 413:
             return True
@@ -334,8 +528,7 @@ def _tpm_over_limit(exc: OpenAIError) -> tuple[int, int] | None:
     (including when the numbers are present but M <= N -- that case IS
     plausibly transient and the normal backoff-and-retry applies).
     """
-    body = getattr(exc, "body", None)
-    message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    message = _error_body(exc).get("message", "")
     m = _TPM_LIMIT_REQUESTED_PATTERN.search(message or "")
     if not m:
         return None
@@ -358,8 +551,7 @@ def _is_hard_payload_limit(exc: OpenAIError) -> bool:
     """
     if not isinstance(exc, APIStatusError) or exc.status_code != 413:
         return False
-    body = getattr(exc, "body", None)
-    return isinstance(body, dict) and body.get("error", {}).get("code") == "request_too_large"
+    return _error_body(exc).get("code") == "request_too_large"
 
 
 #: Groq's rate_limit_exceeded message names the actual wait, but NOT always
@@ -386,6 +578,26 @@ _RETRY_AFTER_MESSAGE_PATTERN = re.compile(
 #: identically, while also misreporting the wait as "the provider's
 #: per-minute budget" resetting soon when it's actually a day-scale quota.
 _DAILY_LIMIT_PATTERN = re.compile(r"tokens per day\s*\(TPD\)", re.IGNORECASE)
+
+#: Groq's rate-limit messages open with "Rate limit reached for model
+#: `<id>`" -- that `<id>` is the model that ACTUALLY ran out of TPD quota,
+#: which is not always the model this code requested. In particular,
+#: Groq's "compound"/"compound-mini" systems (see PROVIDER_CONFIG's
+#: comment on them) are agentic wrappers that internally delegate to an
+#: underlying instruct model (observed in practice: requesting
+#: "groq/compound-mini" produced a TPD error naming
+#: "llama-3.3-70b-versatile", the model compound-mini was routing to, not
+#: compound-mini itself) -- so the quota that's actually exhausted belongs
+#: to that underlying model, not the wrapper id in `resolved_model`.
+#: Extracting it lets automatic fallback exclude BOTH ids from the next
+#: pick, rather than switching to a different wrapper that may delegate to
+#: the very same already-exhausted underlying model.
+_MESSAGE_MODEL_PATTERN = re.compile(r"for model `([^`]+)`")
+
+
+def _message_named_model(message: str) -> str | None:
+    m = _MESSAGE_MODEL_PATTERN.search(message or "")
+    return m.group(1) if m else None
 
 
 def _parse_message_wait_seconds(message: str) -> float | None:
@@ -426,8 +638,7 @@ def _is_daily_limit(exc: OpenAIError) -> float | None:
     fail-fast path rather than going through the normal short-backoff
     retry that per-minute (TPM) limits use.
     """
-    body = getattr(exc, "body", None)
-    message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    message = _error_body(exc).get("message", "")
     if not _DAILY_LIMIT_PATTERN.search(message or ""):
         return None
     return _parse_message_wait_seconds(message) or RATE_LIMIT_BACKOFF_SECONDS
@@ -447,8 +658,7 @@ def _rate_limit_wait_seconds(exc: OpenAIError) -> float:
     caught separately by _is_daily_limit() and fails fast instead of
     reaching this function's caller at all.
     """
-    body = getattr(exc, "body", None)
-    message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    message = _error_body(exc).get("message", "")
     parsed = _parse_message_wait_seconds(message)
     if parsed is not None:
         return parsed
@@ -464,10 +674,95 @@ def _rate_limit_wait_seconds(exc: OpenAIError) -> float:
     return RATE_LIMIT_BACKOFF_SECONDS
 
 
-def _query_llm_json_array(
+class _DailyQuotaExhausted(Exception):
+    """Internal signal (never escapes this module) raised by
+    _query_llm_json_array_one_model() when a model hits its tokens-per-day
+    quota, so the outer _query_llm_json_array() can decide whether to
+    switch models and retry, versus giving up -- see that function.
+    """
+
+    def __init__(self, resolved_model: str, wait_seconds: float, original: OpenAIError, message_model: str | None = None):
+        super().__init__(str(original))
+        self.resolved_model = resolved_model
+        self.original = original
+        #: The model id Groq's own error message names as exhausted, if it
+        #: differs from `resolved_model` (the id this code requested) --
+        #: see _MESSAGE_MODEL_PATTERN above for why these two can diverge.
+        self.message_model = message_model
+        self.wait_seconds = wait_seconds
+
+
+class _ModelOutputInvalid(Exception):
+    """Internal signal (never escapes this module) raised by
+    _query_llm_json_array_one_model() when a model consistently fails to
+    produce a response this pipeline can use -- every one of `retries`
+    attempts either wasn't valid JSON (json.JSONDecodeError) or didn't
+    pass schema validation (ValueError from validator(), e.g. missing
+    required fields) -- as opposed to a provider-side rejection
+    (OpenAIError), which raises RuntimeError directly instead (that's an
+    infrastructure problem a different model can't be assumed to fix).
+
+    This is a genuinely different failure mode from _DailyQuotaExhausted,
+    but worth the same treatment: at temperature=0 a model that fails
+    this way on attempt 1 will fail identically on attempts 2 and 3 (all
+    3 retries just re-send the exact same request), so the retries
+    accomplish nothing on their own -- observed directly when an
+    automatically-selected fallback model ("allam-2-7b", small and not
+    well-suited to structured JSON extraction from source code) hit the
+    exact same JSON syntax error on all 3 attempts. Trying a different
+    model is a real chance at success, not just noise, so
+    _query_llm_json_array() gets the same opportunity to switch here as
+    it does for a daily-quota exhaustion.
+    """
+
+    def __init__(self, resolved_model: str, original: Exception):
+        super().__init__(str(original))
+        self.resolved_model = resolved_model
+        self.original = original
+
+
+class _ModelUnusable(Exception):
+    """Internal signal (never escapes this module) raised by
+    _query_llm_json_array_one_model() the moment a model turns out unable
+    to handle THIS request at all, for a structural reason no amount of
+    retrying (or even waiting) fixes -- covering four distinct rejections
+    observed in practice, all given the same treatment because they share
+    the same fix (try a different model) and the same non-fix (retrying
+    the identical request against the identical model):
+      - 404: the model doesn't exist, or isn't enabled for this key.
+      - 400 with a code in _MODEL_UNUSABLE_CODES (e.g.
+        "model_terms_required": Groq's org admin hasn't accepted that
+        specific model's terms yet -- observed with
+        "canopylabs/orpheus-arabic-saudi", a TTS model discovery picked up
+        with no way to have known from its id alone that it needed this).
+      - A single request's estimated cost exceeds a model's ENTIRE
+        per-minute (TPM) budget -- not "too much recent traffic", the
+        model's whole budget is smaller than this one request.
+      - 413 request_too_large: a flat cap on the request's raw byte size,
+        smaller than what this prompt needs -- observed directly:
+        automatically switching from 'groq/compound-mini' to its sibling
+        'groq/compound' (for an unrelated TPD reason) landed on a model
+        whose payload cap was too small for the exact same prompt that
+        compound-mini had accepted fine.
+    Raised on the FIRST attempt, not after exhausting `retries` -- unlike
+    a token/rate-limit response, nothing about any of these four changes
+    on a second identical request, so retrying 2 more times would just
+    repeat the exact same rejection for no benefit (this was actually
+    happening before this class existed: 3 identical "requires terms
+    acceptance" errors in a row before finally giving up).
+    """
+
+    def __init__(self, resolved_model: str, original: OpenAIError):
+        super().__init__(str(original))
+        self.resolved_model = resolved_model
+        self.original = original
+
+
+def _query_llm_json_array_one_model(
     *,
     provider: str,
-    model: str | None,
+    resolved_model: str,
+    client: OpenAI,
     system_prompt: str,
     prompt: str,
     item_count: int,
@@ -479,8 +774,14 @@ def _query_llm_json_array(
     debug: bool = False,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
 ) -> list[dict]:
-    """Shared request/retry/parse/validate loop used by both parameter and
-    metric inference -- they only differ in prompts and validation rules.
+    """Request/retry/parse/validate loop for ONE fixed model. Raises
+    _DailyQuotaExhausted (instead of RuntimeError) if `resolved_model` hits
+    its tokens-per-day quota, so the caller (_query_llm_json_array) can try
+    switching to a different model instead of failing outright -- every
+    other failure mode here still raises RuntimeError/re-raises directly,
+    since only a TPD quota is a property of the MODEL that another model on
+    the same account/key can route around (see the module-level "Automatic
+    model fallback" comment above).
 
     Every attempt reserves its estimated token cost against a per-provider
     _RateLimiter shared across the whole process (see this module's "Token
@@ -497,8 +798,6 @@ def _query_llm_json_array(
     harmless and just as verbose as debug alone).
     """
     verbose = verbose or debug
-    client = get_client(provider)
-    resolved_model = model or PROVIDER_CONFIG[provider]["default_model"]
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
@@ -560,15 +859,31 @@ def _query_llm_json_array(
             # `retries` attempts on the same guaranteed-to-fail call. The
             # request was rejected before generating anything, so release
             # the optimistic reservation instead of holding it against
-            # later requests that share this limiter.
+            # later requests that share this limiter. This used to raise
+            # RuntimeError directly; now it's the same _ModelUnusable
+            # signal the "model_terms_required"-style 400s below use, so
+            # the caller gets the same chance to switch models
+            # automatically instead of the whole run just stopping here.
             limiter.record_actual(entry, 0)
-            raise RuntimeError(
-                f"Model '{resolved_model}' was rejected by {provider} (404 model_not_found) -- "
-                f"either it doesn't exist, or this API key doesn't have access to it. "
-                f"Pass --model to use a different one. To see which models this key CAN access:\n"
-                f"  curl -s {PROVIDER_CONFIG[provider]['base_url']}/models "
-                f"-H \"Authorization: Bearer ${PROVIDER_CONFIG[provider]['api_key_env']}\" | python3 -m json.tool"
-            ) from exc
+            raise _ModelUnusable(resolved_model, exc) from exc
+
+        except BadRequestError as exc:
+            if _is_model_unusable(exc):
+                # e.g. Groq's "model_terms_required" -- this model needs an
+                # org admin to accept its terms before it can be used at
+                # all, which no amount of retrying (or even switching
+                # --inference-tpm-budget/batch-size) changes. Same
+                # fail-fast-and-let-the-caller-try-another-model treatment
+                # as NotFoundError above, for the same reason.
+                limiter.record_actual(entry, 0)
+                raise _ModelUnusable(resolved_model, exc) from exc
+            # Any other 400 (a genuine bad request -- malformed messages,
+            # an unsupported parameter, etc.) falls through to the
+            # generic OpenAIError handling below, same as before this
+            # class existed.
+            limiter.record_actual(entry, 0)
+            last_error = exc
+            print(f"Attempt {attempt}/{retries} failed — {exc}")
 
         except OpenAIError as exc:
             # Same reasoning as NotFoundError above -- every branch below is
@@ -585,63 +900,49 @@ def _query_llm_json_array(
                 # that, so fail immediately instead of burning all
                 # `retries` attempts on 65s waits that can't ever succeed.
                 limit, requested = over_limit
-                raise RuntimeError(
-                    f"This request needs ~{requested:,} tokens, but '{resolved_model}' on {provider} is "
-                    f"capped at {limit:,} tokens per minute for this account -- a single request over the "
-                    f"limit can never succeed no matter how long it waits. Options:\n"
-                    f"  - Pass --model to use a model with a higher per-minute budget on your account "
-                    f"(check with the models-list command below; on Groq, 'groq/compound'/"
-                    f"'groq/compound-mini' typically get a much higher TPM than standard instruct models).\n"
-                    f"  - This benchmark's main.cc/problem.hh may just be large -- {item_count} "
-                    f"{item_label}(s) were requested in one call; a smaller --scenario-params selection "
-                    f"reduces completion size, though the source text itself is the bigger cost here.\n"
-                    f"  curl -s {PROVIDER_CONFIG[provider]['base_url']}/models "
-                    f"-H \"Authorization: Bearer ${PROVIDER_CONFIG[provider]['api_key_env']}\" | python3 -m json.tool"
-                ) from exc
+                # This model's per-minute budget can never fit this
+                # request no matter how long it waits -- but a DIFFERENT
+                # model on the same account may have a much higher TPM
+                # cap (this file's own PROVIDER_CONFIG comment notes
+                # exactly that spread on Groq), so this is the same
+                # "this model can't handle this request, try another"
+                # situation as _ModelUnusable's other cases, not a dead
+                # end -- let the caller attempt a switch instead of
+                # failing immediately.
+                raise _ModelUnusable(resolved_model, exc) from exc
             daily_wait = _is_daily_limit(exc)
             if daily_wait is not None:
                 # A tokens-per-day quota, not the per-minute budget the
                 # rest of this loop's retries assume -- see
                 # _DAILY_LIMIT_PATTERN above. The wait is routinely 10s of
                 # minutes to multiple hours, nothing a retry loop inside
-                # one run should sit through blindly (and the account-wide
-                # quota is shared across every model, so switching --model
-                # on the same provider/account doesn't route around it the
-                # way it does for the per-minute over_limit case above).
-                # Fail fast with the actual wait instead of retrying with
-                # the wrong (much shorter) backoff and misreporting this as
-                # a per-minute limit resetting soon.
-                raise RuntimeError(
-                    f"'{resolved_model}' on {provider} has hit its account-wide tokens-per-day quota -- "
-                    f"not a per-minute rate limit, so short retries can't fix it; the provider says to try "
-                    f"again in {_format_wait(daily_wait)}. Options:\n"
-                    f"  - Wait for the daily quota to reset (see the exact time in the error below), then "
-                    f"re-run the same command -- already-cached parameters/metrics won't be re-queried.\n"
-                    f"  - Pass --provider openai (with OPENAI_API_KEY set) to use a different account's quota "
-                    f"for the rest of this run.\n"
-                    f"  - Pass --fallback-on-error to fill any still-uninferred items with a low-confidence "
-                    f"placeholder instead of stopping the run, and fix them by hand in review.\n"
-                    f"  Original error: {exc}"
+                # one run should sit through blindly. Unlike a per-minute
+                # limit, this one IS worth trying a different model for --
+                # Groq tracks TPD per model, not account-wide (see the
+                # "Automatic model fallback" section above) -- so raise a
+                # distinct signal instead of RuntimeError directly and let
+                # _query_llm_json_array() decide whether switching models
+                # can route around it before giving up.
+                message = _error_body(exc).get("message", "")
+                message_model = _message_named_model(message)
+                raise _DailyQuotaExhausted(
+                    resolved_model, daily_wait, exc,
+                    message_model=message_model if message_model != resolved_model else None,
                 ) from exc
             if _is_hard_payload_limit(exc):
                 # A flat request-body-size cap, not a time-windowed budget --
                 # unlike a TPM rate limit, there's no "wait it out" here at
                 # all: the identical, still-oversized request would just be
-                # rejected again immediately. Fail fast, same rationale as
-                # the over_limit branch above.
-                raise RuntimeError(
-                    f"'{resolved_model}' on {provider} rejected this request as too large "
-                    f"(413 request_too_large) -- this is a hard cap on the request payload itself, not a "
-                    f"per-minute budget, so retrying the identical request can't help. The prompt sent here "
-                    f"was ~{len(prompt):,} characters ({item_count} {item_label}(s) plus the full "
-                    f"main.cc/problem.hh source). Options:\n"
-                    f"  - Pass --model to try a model with a larger request-size limit on your account.\n"
-                    f"  - Select fewer parameters/metrics at once (--scenario-params), or trim/split this "
-                    f"benchmark's main.cc/problem.hh if it's unusually large -- the embedded source text is "
-                    f"almost always the biggest contributor to prompt size here.\n"
-                    f"  curl -s {PROVIDER_CONFIG[provider]['base_url']}/models "
-                    f"-H \"Authorization: Bearer ${PROVIDER_CONFIG[provider]['api_key_env']}\" | python3 -m json.tool"
-                ) from exc
+                # rejected again immediately by THIS model. Observed
+                # directly: switching from 'groq/compound-mini' to
+                # 'groq/compound' (an automatic fallback for a DIFFERENT
+                # reason, its sibling wrapper) landed on a model with a
+                # smaller request-size cap that then rejected the exact
+                # same prompt outright. A different model may well have a
+                # larger cap, so -- same as the over_limit case above --
+                # this is "this model can't handle this request", not
+                # "nothing can"; let the caller try switching first.
+                raise _ModelUnusable(resolved_model, exc) from exc
             if _is_rate_or_size_limited(exc):
                 wait = _rate_limit_wait_seconds(exc)
                 print(
@@ -661,7 +962,209 @@ def _query_llm_json_array(
         if attempt < retries:
             time.sleep(retry_delay)
 
+    if isinstance(last_error, (json.JSONDecodeError, ValueError)):
+        # Every attempt failed on the MODEL's OUTPUT (malformed JSON, or
+        # JSON that didn't pass schema validation) rather than on a
+        # provider-side rejection -- a different model gets a genuine shot
+        # at this prompt, so let the caller try switching instead of
+        # failing immediately. See _ModelOutputInvalid's docstring.
+        raise _ModelOutputInvalid(resolved_model, last_error) from last_error
     raise RuntimeError(f"All {retries} attempts failed.") from last_error
+
+
+def _query_llm_json_array(
+    *,
+    provider: str,
+    model: str | None,
+    system_prompt: str,
+    prompt: str,
+    item_count: int,
+    item_label: str,
+    validator,
+    retries: int,
+    retry_delay: float,
+    verbose: bool,
+    debug: bool = False,
+    tpm_budget: int = DEFAULT_TPM_BUDGET,
+    allow_model_fallback: bool = True,
+) -> list[dict]:
+    """Wraps _query_llm_json_array_one_model() with automatic model
+    fallback: if the model in use hits its tokens-per-day quota, and
+    `allow_model_fallback` is set, try discovering a different model this
+    API key can access (see _discover_alternate_model()) and retry with it
+    -- carrying that switch forward (via _ACTIVE_MODEL) to every later call
+    this run makes to the same provider, not just this one -- instead of
+    immediately failing the whole run. Falls back to today's behavior
+    (fail fast with a clear message) once every reachable model has been
+    tried, or if fallback is disabled, or if discovery itself doesn't turn
+    up an untried model.
+
+    `model` -- an explicit --model the caller pinned -- is always tried
+    first and is never itself replaced by _ACTIVE_MODEL's last automatic
+    pick from a PRIOR call; but if that pinned model is the one that hits
+    its TPD quota, it's just as eligible for automatic fallback as the
+    default would be, since the alternative is failing the run outright
+    for exactly the problem this feature exists to solve.
+    """
+    client = get_client(provider)
+    tried: set[str] = set()
+    last_daily_error: _DailyQuotaExhausted | None = None
+    last_failure_kind: str | None = None  # "daily" or "output" -- whichever happened LAST, for the final message
+
+    if verbose or debug:
+        # Deliberately printed every call (not just once per process) so
+        # it's impossible to miss in a log, and so it's an unambiguous way
+        # to tell whether a given ai/inference.py copy actually has this
+        # feature at all -- if this line is absent from your output, the
+        # file being imported isn't this one (stale copy, or an old
+        # __pycache__/*.pyc being reused instead of the current source).
+        print(
+            f"[{provider}] model fallback : "
+            f"{'enabled -- will try another model on a tokens-per-day quota' if allow_model_fallback else 'disabled (--no-model-fallback)'}"
+        )
+
+    last_output_error: _ModelOutputInvalid | None = None
+    last_unusable_error: _ModelUnusable | None = None
+
+    while True:
+        resolved_model = model or _ACTIVE_MODEL.get(provider) or PROVIDER_CONFIG[provider]["default_model"]
+        tried.add(resolved_model)
+        try:
+            return _query_llm_json_array_one_model(
+                provider=provider,
+                resolved_model=resolved_model,
+                client=client,
+                system_prompt=system_prompt,
+                prompt=prompt,
+                item_count=item_count,
+                item_label=item_label,
+                validator=validator,
+                retries=retries,
+                retry_delay=retry_delay,
+                verbose=verbose,
+                debug=debug,
+                tpm_budget=tpm_budget,
+            )
+        except _DailyQuotaExhausted as exc:
+            last_daily_error = exc
+            last_failure_kind = "daily"
+            exhausted_ids = {exc.resolved_model}
+            if exc.message_model:
+                # The id actually named in Groq's error can differ from
+                # what we requested -- e.g. requesting "groq/compound-mini"
+                # (an agentic wrapper) surfaced a TPD error naming
+                # "llama-3.3-70b-versatile", the underlying model it
+                # delegated to. Exclude both, or discovery could "switch"
+                # to a different wrapper that delegates to the very same
+                # already-exhausted underlying model and fail identically.
+                exhausted_ids.add(exc.message_model)
+            _EXHAUSTED_MODELS.setdefault(provider, set()).update(exhausted_ids)
+            tried.update(exhausted_ids)
+            if not allow_model_fallback:
+                break
+            exclude = tried | _EXHAUSTED_MODELS.get(provider, set())
+            alternate = _discover_alternate_model(client, provider, exclude)
+            if alternate is None:
+                break
+            named_note = f" (which delegates to '{exc.message_model}')" if exc.message_model else ""
+            print(
+                f"'{exc.resolved_model}'{named_note} on {provider} has hit its tokens-per-day quota (retry "
+                f"in {_format_wait(exc.wait_seconds)}) -- switching to '{alternate}' for the rest of this "
+                f"run instead of waiting or stopping.",
+                file=sys.stderr,
+            )
+            _ACTIVE_MODEL[provider] = alternate
+            # Loop again with the new model, fresh `retries` attempts of
+            # its own -- one model's exhausted quota shouldn't cost the
+            # next model any of its own retry budget.
+        except _ModelOutputInvalid as exc:
+            last_output_error = exc
+            last_failure_kind = "output"
+            _EXHAUSTED_MODELS.setdefault(provider, set()).add(exc.resolved_model)
+            tried.add(exc.resolved_model)
+            if not allow_model_fallback:
+                break
+            exclude = tried | _EXHAUSTED_MODELS.get(provider, set())
+            alternate = _discover_alternate_model(client, provider, exclude)
+            if alternate is None:
+                break
+            print(
+                f"'{exc.resolved_model}' on {provider} produced unusable output on all {retries} attempts "
+                f"({exc.original}) -- switching to '{alternate}' for the rest of this run instead of "
+                f"giving up (retrying the SAME model wouldn't help: it's deterministic at temperature=0, so "
+                f"identical requests just fail identically).",
+                file=sys.stderr,
+            )
+            _ACTIVE_MODEL[provider] = alternate
+        except _ModelUnusable as exc:
+            last_unusable_error = exc
+            last_failure_kind = "unusable"
+            _EXHAUSTED_MODELS.setdefault(provider, set()).add(exc.resolved_model)
+            tried.add(exc.resolved_model)
+            if not allow_model_fallback:
+                break
+            exclude = tried | _EXHAUSTED_MODELS.get(provider, set())
+            alternate = _discover_alternate_model(client, provider, exclude)
+            if alternate is None:
+                break
+            print(
+                f"'{exc.resolved_model}' on {provider} can't handle this request ({exc.original}) -- "
+                f"switching to '{alternate}' for the rest of this run instead of giving up.",
+                file=sys.stderr,
+            )
+            _ACTIVE_MODEL[provider] = alternate
+
+    # Every reachable model either isn't accessible, is already known
+    # unusable, or fallback itself is disabled -- fail the same way this
+    # always has, but naming every model this run actually tried so the
+    # message reflects what was actually attempted, not just the last one.
+    # Priority when multiple kinds of failure occurred across different
+    # models in the same call (rare, but possible if the run cycles
+    # through several unsuitable/exhausted
+    # models) -- an "unusable output" failure is more actionable to report
+    # than "hit its quota", since the corresponding option list differs.
+    tried_list = ", ".join(f"'{m}'" for m in sorted(tried))
+    if last_failure_kind == "output":
+        raise RuntimeError(
+            f"{tried_list} on {provider} all produced unusable output (invalid JSON, or JSON that failed "
+            f"schema validation) for this request -- retrying the same model again wouldn't help (it's "
+            f"deterministic at temperature=0). Options:\n"
+            f"  - Pass --model to name a specific model known to handle this reliably on your account "
+            f"(larger general-purpose instruct models tend to do better on structured JSON extraction than "
+            f"small or narrowly-specialized ones).\n"
+            f"  - Pass --fallback-on-error to fill any still-uninferred items with a low-confidence "
+            f"placeholder instead of stopping the run, and fix them by hand in review.\n"
+            f"  Last error (from '{last_output_error.resolved_model}'): {last_output_error.original}"
+        ) from last_output_error.original
+    if last_failure_kind == "unusable":
+        raise RuntimeError(
+            f"{tried_list} on {provider} couldn't handle this request (model doesn't exist / isn't "
+            f"enabled for this key, needs an org admin to accept its terms first, or this request's size "
+            f"exceeds that model's per-minute-token or per-request-payload cap -- see the error below for "
+            f"which). Options:\n"
+            f"  - Pass --model to name a model you know this account can actually use for a request this size.\n"
+            f"  - This benchmark's main.cc/problem.hh may just be large -- a smaller --scenario-params "
+            f"selection reduces prompt size, though the embedded source text is usually the bigger cost.\n"
+            f"  - Check which models this key can access:\n"
+            f"    curl -s {PROVIDER_CONFIG[provider]['base_url']}/models "
+            f"-H \"Authorization: Bearer ${PROVIDER_CONFIG[provider]['api_key_env']}\" | python3 -m json.tool\n"
+            f"  - Pass --fallback-on-error to fill any still-uninferred items with a low-confidence "
+            f"placeholder instead of stopping the run, and fix them by hand in review.\n"
+            f"  Last error (from '{last_unusable_error.resolved_model}'): {last_unusable_error.original}"
+        ) from last_unusable_error.original
+    raise RuntimeError(
+        f"{tried_list} on {provider} {'all hit their' if len(tried) > 1 else 'has hit its'} "
+        f"tokens-per-day quota -- not a per-minute rate limit, so short retries can't fix it; the provider "
+        f"says to try '{last_daily_error.resolved_model}' again in {_format_wait(last_daily_error.wait_seconds)}. "
+        f"Options:\n"
+        f"  - Wait for the daily quota to reset (see the exact time in the error below), then re-run the "
+        f"same command -- already-cached parameters/metrics won't be re-queried.\n"
+        f"  - Pass --provider openai (with OPENAI_API_KEY set) to use a different account's quota for the "
+        f"rest of this run.\n"
+        f"  - Pass --fallback-on-error to fill any still-uninferred items with a low-confidence placeholder "
+        f"instead of stopping the run, and fix them by hand in review.\n"
+        f"  Original error: {last_daily_error.original}"
+    ) from last_daily_error.original
 
 
 #: Max candidates sent in a single inference request. Even with the compact
@@ -695,6 +1198,7 @@ def infer_parameter_metadata(
     known_corrections: list[dict] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
+    allow_model_fallback: bool = True,
 ) -> list[dict]:
     """Ask an LLM (Groq or OpenAI) to infer semantic metadata for all
     discovered parameters -- as one request if `candidates` fits within
@@ -714,6 +1218,11 @@ def infer_parameter_metadata(
     is a list of prior human corrections to similarly named/typed parameters,
     included in the prompt as guidance so the model doesn't repeat a mistake
     a human already fixed once.
+
+    `allow_model_fallback` -- see _query_llm_json_array(). Left on by
+    default so a model hitting its daily quota mid-run doesn't fail
+    parameter inference outright; pass False to force today's fail-fast
+    behavior instead (e.g. --no-model-fallback).
     """
     results: list[dict] = []
 
@@ -736,6 +1245,7 @@ def infer_parameter_metadata(
                 verbose=verbose,
                 debug=debug,
                 tpm_budget=tpm_budget,
+                allow_model_fallback=allow_model_fallback,
             ))
     return results
 
@@ -755,6 +1265,7 @@ def infer_metric_metadata(
     known_corrections: list[dict] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     tpm_budget: int = DEFAULT_TPM_BUDGET,
+    allow_model_fallback: bool = True,
 ) -> list[dict]:
     """Ask an LLM (Groq or OpenAI) to infer semantic metadata -- with SI
     units -- for all discovered output/solution metrics. Batched and
@@ -762,6 +1273,7 @@ def infer_metric_metadata(
     its docstring.
 
     `known_corrections` -- see infer_parameter_metadata().
+    `allow_model_fallback` -- see infer_parameter_metadata() / _query_llm_json_array().
     """
     results: list[dict] = []
 
@@ -784,6 +1296,7 @@ def infer_metric_metadata(
                 verbose=verbose,
                 debug=debug,
                 tpm_budget=tpm_budget,
+                allow_model_fallback=allow_model_fallback,
             ))
     return results
 

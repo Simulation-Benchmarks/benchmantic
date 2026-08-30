@@ -256,6 +256,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     meta.add_argument("--model", type=str, default=None)
     meta.add_argument("--clear-cache", action="store_true")
     meta.add_argument("--fallback-on-error", action="store_true")
+    meta.add_argument("--no-model-fallback", action="store_true",
+                       help="Disable automatic fallback to a different model when the current one hits its "
+                            "provider tokens-per-day (TPD) quota mid-run (on by default -- see PROVIDER_CONFIG "
+                            "in ai/inference.py for why this helps on Groq, whose TPD quota is tracked per "
+                            "model rather than account-wide: a model that runs out doesn't mean the account "
+                            "has, so an available alternate model this key can access is tried automatically "
+                            "instead of stopping the run. Once switched, that model is used for the rest of "
+                            "this run's inference calls. Pass this flag to go back to failing immediately "
+                            "instead, e.g. if you specifically need results from one named --model.)")
     meta.add_argument("--skip-review", action="store_true",
                        help="Skip the interactive review/edit step after AI inference (required for "
                             "non-interactive/CI runs -- it needs a real terminal for input()).")
@@ -596,7 +605,18 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
     # a run without the dataset sidecar still gets a review report, just
     # covering the benchmark's own parameters and metrics.
     review_path: Path | None = output_dir / "review.md"
-    show_args = show_description.build_arg_parser().parse_args([str(benchmark_path)])
+    # --quiet unconditionally (not just when non-verbose): the full
+    # Markdown table is about to be saved to review.md and then listed
+    # again in the "Generated files" summary this run prints at the end,
+    # so dumping the whole thing to the terminal here too -- on top of
+    # workflow.py's own separate show_description step potentially doing
+    # the same right after -- was mostly just noise to scroll past
+    # regardless of verbosity. --verbose/--debug still show run_step's own
+    # captured-output-on-failure behavior and every other step's detail;
+    # this table specifically just isn't the kind of thing either flag was
+    # meant to surface, since it's not diagnostic info, it's the finished
+    # artifact's own content, already written to disk.
+    show_args = show_description.build_arg_parser().parse_args([str(benchmark_path), "--quiet"])
     run_step("Generating review report", args.verbose or args.debug, show_description.run, show_args)
 
     benchmark_label = (staged_by_id.get("./") or {}).get("name") or software_name

@@ -275,6 +275,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "outputs/dumux/review.md).")
     ap.add_argument("--no-save", action="store_true",
                      help="Only print to stdout -- don't save a review.md (or --output) file at all.")
+    ap.add_argument("--quiet", action="store_true",
+                     help="Don't print the rendered Markdown tables to stdout -- still saves review.md "
+                          "(or --output) unless --no-save is also given, and still prints the 'Saved ...' "
+                          "confirmation line. Useful when this is called as one step of a larger pipeline "
+                          "(describe_benchmark.py, workflow.py) that already lists review.md among its "
+                          "generated files, where dumping the full table to the terminal on top of that -- "
+                          "sometimes twice, once per caller -- is mostly just noise to scroll past.")
     return ap
 
 
@@ -296,7 +303,8 @@ def run(args: argparse.Namespace) -> None:
     build_metrics_section(by_id, out)
 
     text = "\n".join(out)
-    print(text)
+    if not args.quiet:
+        print(text)
 
     if not args.no_save:
         # Default: save right next to the input (e.g. outputs/dumux/benchmark.jsonld
@@ -304,7 +312,7 @@ def run(args: argparse.Namespace) -> None:
         # and the Snakefile zip -- not just in stdout/terminal scrollback.
         save_path = args.output or (args.metadata_jsonld.parent / "review.md")
         save_path.write_text(text, encoding="utf-8")
-        print(f"\nSaved {save_path}")
+        print(f"Saved {save_path}" if args.quiet else f"\nSaved {save_path}")
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -847,6 +847,38 @@ def parse_outputs_arg(raw: str) -> dict[str, bool]:
     return result
 
 
+def _describe_outputs_selection(selection: dict[str, bool]) -> str:
+    """One-line, human-readable summary of a resolved Outputs selection --
+    "Standard -- Semantic description, dataset provenance, and Snakefile."
+    when it matches one of ai.tui's named presets exactly, or a plain list
+    of what's included when it doesn't (a --outputs list like
+    "dataset,snakefile", or a "Custom" combination that happens not to
+    match any preset). Printed once right after the Outputs step resolves,
+    regardless of whether that happened via the interactive picker, a
+    reused saved selection, or --outputs -- every path funnels through
+    _resolve_outputs_selection() and this is the one place that then says
+    what was actually decided, so a non-interactive/CI run (which prints
+    nothing else here) isn't left showing an unexplained gap between the
+    "Select outputs" and "Infer & review" step banners.
+    """
+    try:
+        from ai import tui
+    except ImportError:
+        tui = None  # type: ignore[assignment]
+
+    if tui is not None:
+        for name, preset in tui.OUTPUT_PRESETS.items():
+            if all(selection.get(k, True) == v for k, v in preset.items()):
+                return f"{name} -- {tui.OUTPUT_PRESET_INFO.get(name, '')}"
+
+    included = ["benchmark description", "review report"] if selection.get("description", True) else []
+    if selection.get("dataset"):
+        included.append("dataset provenance")
+    if selection.get("snakefile"):
+        included.append("Snakefile")
+    return "Custom -- " + (", ".join(included) if included else "nothing (no artifacts selected)")
+
+
 def _resolve_outputs_selection(args: argparse.Namespace, module_dir: Path) -> dict[str, bool]:
     """Decide which of dataset/snakefile to generate this run (the
     "Outputs" step) -- the review report isn't part of this decision, it's
@@ -1467,6 +1499,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     # see the "description" key's docstring above _OUTPUT_PRESET_ALIASES.
     _print_step_header(3, "Select outputs")
     outputs_selection = _resolve_outputs_selection(args, module_dir)
+    print(f"-> {_describe_outputs_selection(outputs_selection)}")
     skip_inference = not outputs_selection.get("description", True)
 
     _print_step_header(4, "Infer & review")
@@ -1796,6 +1829,7 @@ def _infer_and_review(
                 known_corrections=known_corrections,
                 batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
                 tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
+                allow_model_fallback=not getattr(args, "no_model_fallback", False),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
@@ -1890,6 +1924,7 @@ def _infer_and_review(
                 known_corrections=known_metric_corrections,
                 batch_size=getattr(args, "inference_batch_size", DEFAULT_BATCH_SIZE),
                 tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
+                allow_model_fallback=not getattr(args, "no_model_fallback", False),
             )
         except (RuntimeError, ValueError) as exc:
             if not args.fallback_on_error:
