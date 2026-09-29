@@ -50,7 +50,8 @@ from metadata.parameters import (
     DEFAULT_SCENARIO_SECTIONS, attach_cpp_hints, build_parameter_fields,
     default_scenario_candidates, discover_parameters, resolve_case_params,
 )
-from metadata.publication import extract_publication_citation
+from metadata import mardi
+from metadata.publication import extract_publication_citation, extract_publication_doi
 from metadata.repository import (
     discover_cases, extract_authors_file_hint, extract_authors_list,
     extract_benchmark_description, extract_class_label, extract_publisher_from_repo_url,
@@ -90,6 +91,12 @@ DEFAULT_CONTEXT = {
     # "represents" below were pointing at undefined-prefix CURIEs that never
     # actually expanded to the IRIs those terms are supposed to mean.
     "obo": "http://purl.obolibrary.org/obo/",
+    "wd": "http://www.wikidata.org/entity/",
+    # QUDT prefixes -- without "unit", every "has unit" value (unit:M,
+    # unit:RAD-PER-SEC, ...) was parsed as an absolute IRI with the made-up
+    # scheme "unit:" instead of expanding to the real QUDT unit IRI.
+    "unit": "http://qudt.org/vocab/unit/",
+    "quantitykind": "http://qudt.org/vocab/quantitykind/",
     "sio": "http://semanticscience.org/resource/",
     "label": {"@id": "rdfs:label"},
     "Field": {"@id": "cr:Field"},
@@ -118,8 +125,12 @@ DEFAULT_CONTEXT = {
     "has parameter set": {"@id": "m4i:hasParameterSet"},
     "evaluates": {"@id": "m4i:evaluates"},
     "investigates": {"@id": "m4i:investigates"},
-    "uses": "mathmod:uses",
-    "describedAsDocumentedBy": "mathmod:describedAsDocumentedBy",
+    # wd:P2283 ("uses") -- what semantic_benchmark reads (vocabulary.USES)
+    # and what its Benchmark SHACL shape constrains to mathmod:MathematicalModel.
+    "uses": {"@id": "wd:P2283"},
+    # mathmod:P104 -- what semantic_benchmark reads (vocabulary.DESCRIBED_BY)
+    # and what the reference rotating-cylinders description uses.
+    "describedAsDocumentedBy": {"@id": "mathmod:P104"},
     "extract": {"@id": "cr:extract"},
     "jsonPath": {"@id": "cr:jsonPath"},
     "source": {"@id": "cr:source"},
@@ -194,6 +205,7 @@ def build_manifest(
     spdx = extract_spdx_info(problem_hh_text, main_cc_text)
     class_label = extract_class_label(problem_hh_text, main_cc_text)
     citation = extract_publication_citation(benchmark_description)
+    publication_doi = extract_publication_doi(benchmark_description)
     readme_license_id = extract_readme_license(readme_text)
     repo_url = extract_readme_repo_url(readme_text)
 
@@ -243,8 +255,17 @@ def build_manifest(
         # local id built from investigates_label when this is None.
         "investigates_qid": None,
         "investigates_label": class_label or MANIFEST_FALLBACKS["label"],
+        # Same story for the mathematical model (the benchmark's "uses"):
+        # nothing in the source names it formally, so the label is a
+        # placeholder built from the problem label unless overridden with
+        # --math-model-label / --math-model-id (see apply_semantic_overrides()).
+        "model_qid": None,
+        "model_label": f"{class_label or MANIFEST_FALLBACKS['label']} model",
         "software_label": detect_software_label(problem_hh_text, main_cc_text) or MANIFEST_FALLBACKS["software_label"],
         "publication_label": citation or MANIFEST_FALLBACKS["publication_label"],
+        # Used as the publication node's @id when present (as in the
+        # reference descriptions), otherwise it stays local:publication.
+        "publication_doi": publication_doi,
         "root_description": benchmark_description or None,
         "date_published": None,
         "authors": authors,
@@ -284,6 +305,146 @@ def build_manifest(
 
     return manifest
 
+
+
+#: Status notes the review step appends to an item's explanation (see
+#: ai.review._append_note / ai.tui). Useful while reviewing, and kept in the
+#: module's metadata cache, but not something to publish -- stripped from the
+#: dcterms:description written to the JSON-LD by clean_description().
+REVIEW_NOTES = (
+    "mapping accepted as-is without correction",
+    "accepted at low confidence without correction",
+    "manually corrected by reviewer",
+    "reviewed and accepted (previously auto-accepted)",
+)
+_REVIEW_NOTE_PATTERN = re.compile(r"\s*\[(?:" + "|".join(re.escape(n) for n in REVIEW_NOTES) + r")\]")
+
+
+def clean_description(text: str | None) -> str:
+    """The LLM/reviewer explanation minus review-status bookkeeping notes."""
+    return _REVIEW_NOTE_PATTERN.sub("", text or "").strip()
+
+
+SEMANTIC_LINKS_CACHE = ".semantic_links_cache.json"
+
+
+def _confirm_mardi_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Show the MaRDI matches and let the user pick one (Enter = first) or 'n' for none."""
+    print("\nMaRDI portal matches for this benchmark's research problem / mathematical model:")
+    for i, c in enumerate(candidates, 1):
+        p, m = c["problem"], c["model"]
+        print(f"  [{i}] research problem:    {p['label']}  ({p['url']})")
+        if p.get("description"):
+            print(f"      {p['description']}")
+        print(f"      mathematical model:  {m['label']}  ({m['url']})" if m
+              else "      mathematical model:  (none linked on MaRDI -- placeholder kept)")
+    while True:
+        choice = input("Use which? [Enter = 1, number, n = none / keep local ids]: ").strip().lower()
+        if choice == "":
+            return candidates[0]
+        if choice in ("n", "no", "none"):
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1]
+        print("Not a valid choice.")
+
+
+def lookup_semantic_links(
+    manifest: dict[str, Any], args: argparse.Namespace, module_dir: Path, benchmark_description: str,
+) -> dict[str, Any] | None:
+    """Find the research problem + mathematical model on the MaRDI portal.
+
+    Uses the module's .semantic_links_cache.json if present (and not
+    --clear-cache), so the question is only asked once per benchmark.
+    A single match is used directly (and reported); with several, an
+    interactive run asks the user to pick one, while --skip-review (or no
+    terminal) keeps the placeholders. Returns the chosen candidate, or None.
+    """
+    cache_file = module_dir / SEMANTIC_LINKS_CACHE
+    if getattr(args, "clear_cache", False) and cache_file.exists():
+        cache_file.unlink()
+    if cache_file.exists():
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        return None if cached.get("declined") else cached
+
+    terms = mardi.search_terms(manifest.get("label"), benchmark_description)
+    try:
+        candidates = mardi.find_candidates(terms)
+    except mardi.MardiError as exc:
+        print(f"note: MaRDI lookup skipped ({exc}); using placeholders.")
+        return None
+    if not candidates:
+        print(f"note: no research problem found on the MaRDI portal for {terms}; using placeholders.")
+        return None
+
+    interactive = not getattr(args, "skip_review", False) and sys.stdin.isatty()
+    if len(candidates) == 1:
+        # A single type-filtered match: use it without asking, but say so
+        # (it's cached -- --clear-cache or the id flags undo it).
+        chosen = candidates[0]
+        model = chosen["model"]
+        print(f"MaRDI: research problem = {chosen['problem']['label']!r} ({chosen['problem']['url']})"
+              + (f", mathematical model = {model['label']!r} ({model['url']})" if model else "")
+              + f" -- saved to {SEMANTIC_LINKS_CACHE}")
+    elif interactive:
+        chosen = _confirm_mardi_candidates(candidates)
+    else:
+        print(f"note: {len(candidates)} possible MaRDI research problems for {terms} -- not choosing one "
+              "without review; run without --skip-review to pick, or pass --research-problem-id.")
+        return None  # not cached, so an interactive run still asks
+
+    cache_file.write_text(json.dumps(chosen or {"declined": True}, indent=2), encoding="utf-8")
+    return chosen
+
+
+def apply_semantic_overrides(
+    manifest: dict[str, Any],
+    args: argparse.Namespace,
+    module_dir: Path | None = None,
+    benchmark_description: str = "",
+) -> None:
+    """Set the research problem / mathematical model the benchmark links to.
+
+    Precedence, per field: --research-problem-*/--math-model-* flags, then
+    a MaRDI portal match (see lookup_semantic_links(); skipped with
+    --no-mardi-lookup, or when both ids are given as flags), then the
+    placeholders build_manifest() derived from the source.
+    """
+    problem_label = getattr(args, "research_problem_label", None)
+    problem_id = getattr(args, "research_problem_id", None)
+    model_label = getattr(args, "math_model_label", None)
+    model_id = getattr(args, "math_model_id", None)
+
+    if module_dir is not None and not getattr(args, "no_mardi_lookup", False) and not (problem_id and model_id):
+        match = lookup_semantic_links(manifest, args, module_dir, benchmark_description)
+        if match:
+            manifest["investigates_label"] = match["problem"]["label"] or manifest["investigates_label"]
+            manifest["investigates_qid"] = match["problem"]["url"]
+            if match.get("model"):
+                manifest["model_label"] = match["model"]["label"] or manifest["model_label"]
+                manifest["model_qid"] = match["model"]["url"]
+
+    if problem_label:
+        manifest["investigates_label"] = problem_label
+    if problem_id:
+        manifest["investigates_qid"] = problem_id
+    if model_label:
+        manifest["model_label"] = model_label
+    elif problem_label and not manifest.get("model_qid"):
+        manifest["model_label"] = f"{problem_label} model"
+    if model_id:
+        manifest["model_qid"] = model_id
+
+    placeholders = []
+    if not manifest.get("investigates_qid"):
+        placeholders.append(f"research problem = {manifest['investigates_label']!r}")
+    if not manifest.get("model_qid"):
+        placeholders.append(f"mathematical model = {manifest['model_label']!r}")
+    if placeholders:
+        print(
+            "note: using local placeholder " + " and ".join(placeholders) + ". "
+            "Pass --research-problem-id / --math-model-id (MaRDI portal entity URLs) to link them."
+        )
 
 
 def _format_dependency(dep: dict[str, str]) -> str:
@@ -363,9 +524,7 @@ class GraphBuilder:
         source_id = f"local:source_{suffix}"
         extract_id = self._ensure_extract_node(json_key)
 
-        description = spec.get("description") or ""
-        if semantic_name and semantic_name != raw_label:
-            description = f"{description} (inferred semantic name: {semantic_name})".strip()
+        description = clean_description(spec.get("description"))
 
         # NOTE: deliberately NOT typed "numerical variable" (m4i:NumericalVariable)
         # here, unlike metric nodes in ensure_metric_fields(). Downstream,
@@ -384,6 +543,8 @@ class GraphBuilder:
             "dcterms:description": description,
             "has unit": {"@id": spec["unit"]},
         }
+        if semantic_name and semantic_name != raw_label:
+            var_node["schema:alternateName"] = semantic_name
         if isinstance(value, list):
             # A full_value (multi-token) parameter -- stored as a single
             # space-joined string via "has string value" rather than
@@ -437,9 +598,7 @@ class GraphBuilder:
             # in main.cc / the summary JSON file; the LLM's semantic_name and
             # explanation become a description instead.
             semantic_name = spec.get("semantic_name", key)
-            description = spec.get("description") or ""
-            if semantic_name and semantic_name != key:
-                description = f"{description} (inferred semantic name: {semantic_name})".strip()
+            description = clean_description(spec.get("description"))
             slug = slugify(key)
             metric_id = f"local:metric_{slug}"
             field_id = f"local:field_{slug}"
@@ -449,6 +608,8 @@ class GraphBuilder:
                 {
                     "@id": metric_id, "@type": "numerical variable", "label": key,
                     "dcterms:description": description,
+                    **({"schema:alternateName": semantic_name}
+                       if semantic_name and semantic_name != key else {}),
                     "has unit": {"@id": spec["unit"]},
                     **({"has quantity kind": {"@id": spec["quantityKind"]}}
                        if spec.get("quantityKind") else {}),
@@ -490,16 +651,18 @@ class GraphBuilder:
         # physical phenomenon under study, so fall back to a local id built
         # from investigates_label (see build_manifest()).
         investigates_id = m.get("investigates_qid") or f"local:investigates_{slugify(m['investigates_label'])}"
+        model_id = m.get("model_qid") or f"local:model_{slugify(m['model_label'])}"
+        publication_id = m.get("publication_doi") or "local:publication"
         self.graph.insert(0, {
             "@id": self.benchmark_id,
             "@type": "m4i:Benchmark",
             "label": m["label"],
             **({"dcterms:description": self.benchmark_description} if self.benchmark_description else {}),
             "investigates": {"@id": investigates_id},
-            "uses": {"@id": investigates_id},
+            "uses": {"@id": model_id},
             "evaluates": [{"@id": i} for i in metric_ids],
             "has parameter set": [{"@id": c} for c in config_ids],
-            "describedAsDocumentedBy": {"@id": "local:publication"},
+            "describedAsDocumentedBy": {"@id": publication_id},
             "schema:version": m["version"],
         })
         self.graph.append({
@@ -508,7 +671,12 @@ class GraphBuilder:
             "label": m["investigates_label"],
         })
         self.graph.append({
-            "@id": "local:publication",
+            "@id": model_id,
+            "@type": "mathmod:MathematicalModel",
+            "label": m["model_label"],
+        })
+        self.graph.append({
+            "@id": publication_id,
             "@type": "mathmod:Publication",
             "label": m["publication_label"],
         })
@@ -1088,6 +1256,26 @@ def _print_step_header(step: int, title: str) -> None:
 # 5. Execution Orchestration
 # =============================================================================
 
+def add_semantic_override_args(ap) -> None:
+    """--research-problem-* / --math-model-* flags, shared with describe_benchmark.py."""
+    ap.add_argument("--research-problem-label", type=str, default=None,
+                    help="Label of the research problem the benchmark investigates (m4i:investigates), "
+                         "e.g. 'Taylor-Couette flow'. Default: derived from the problem class name.")
+    ap.add_argument("--research-problem-id", type=str, default=None,
+                    help="IRI for the research problem, ideally a MaRDI portal entity, e.g. "
+                         "https://portal.mardi4nfdi.de/entity/Q6830614. Default: a local: id.")
+    ap.add_argument("--math-model-label", type=str, default=None,
+                    help="Label of the mathematical model the benchmark uses (wd:P2283), e.g. "
+                         "'Taylor-Couette model'. Default: '<research problem label> model'.")
+    ap.add_argument("--math-model-id", type=str, default=None,
+                    help="IRI for the mathematical model, ideally a MaRDI portal entity, e.g. "
+                         "https://portal.mardi4nfdi.de/entity/Q6830616. Default: a local: id.")
+    ap.add_argument("--no-mardi-lookup", action="store_true",
+                    help="Don't search the MaRDI portal for the research problem / mathematical model. "
+                         "By default any id not given above is looked up there (and confirmed in "
+                         "interactive runs); the choice is cached in <module>/" + ".semantic_links_cache.json.")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("module_dir", type=str,
@@ -1123,6 +1311,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="Explicit path to main.cc, only needed if more than one main.cc+problem.hh "
                           "pair is found under module_dir.")
     ap.add_argument("--output", type=Path, default=Path("metadata.jsonld"))
+    add_semantic_override_args(ap)
     ap.add_argument("--scenario-params", type=str, default=None,
                      help="Comma-separated list of raw parameter keys (e.g., 'Cells0,Cells1') that are scenario-specific. "
                           "If omitted, you will be prompted interactively.")
@@ -1581,6 +1770,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         read_text(authors_path) if authors_path else "",
         authors_path.name if authors_path else None,
     )
+    apply_semantic_overrides(manifest, args, module_dir, benchmark_description)
     cases = discover_cases(module_dir)
 
     builder = GraphBuilder(manifest, filtered_parameter_fields, filtered_metric_fields, benchmark_description)

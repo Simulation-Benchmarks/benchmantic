@@ -250,6 +250,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # --- metadata.builder pass-through ---
     meta = ap.add_argument_group("metadata.builder options")
     meta.add_argument("--main-cc", type=Path, default=None)
+    builder.add_semantic_override_args(meta)
     meta.add_argument("--scenario-params", type=str, default=None)
     meta.add_argument("--full-value-params", type=str, default=None)
     meta.add_argument("--provider", type=str, default=None)
@@ -404,6 +405,11 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         keep_clone=args.keep_clone,
         main_cc=args.main_cc,
         output=staged_benchmark,
+        research_problem_label=args.research_problem_label,
+        research_problem_id=args.research_problem_id,
+        math_model_label=args.math_model_label,
+        math_model_id=args.math_model_id,
+        no_mardi_lookup=args.no_mardi_lookup,
         scenario_params=args.scenario_params,
         full_value_params=args.full_value_params,
         provider=args.provider or builder.DEFAULT_PROVIDER,

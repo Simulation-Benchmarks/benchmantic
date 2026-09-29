@@ -109,6 +109,18 @@ Normal output stays short — a handful of `✓ ...`/`○ ...` checklist lines t
 
 Right after parameter selection (`3/6`, before any LLM call), an Outputs step asks (or, after the first run against a module, silently reuses) which artifacts to actually produce -- on a real terminal, a live per-file preview updates as you move between presets, so what you're about to generate is visible before you confirm it; pass `--outputs standard|snakefile|snakefile-only|dataset|description-only|none|dataset,snakefile` to set it non-interactively (see `--help`) instead of being asked. Whichever way it's resolved -- interactively, reused from a previous run, or via `--outputs` -- a one-line summary prints right after, e.g. `-> Standard -- Semantic description, dataset provenance, and Snakefile.`, naming the matching preset (or, for a combination that doesn't match any named preset, a plain list of what's included) -- so a non-interactive/`--skip-review` run isn't left showing a silent gap between the `3/6 Select outputs` and `4/6 Infer & review` banners. Every preset but one (`snakefile-only`) generates the benchmark description and `review.md`; `snakefile-only` skips semantic inference entirely -- no LLM call, no `benchmark.jsonld`, no dataset sidecar, no `review.md` -- see the Outputs-step bullet above and [Config files](#config-files) for the unit-suffix limitation that mode carries.
 
+The benchmark node links to a research problem (`investigates`, a `mathmod:ResearchProblem`) and a mathematical model (`uses` = `wd:P2283`, a `mathmod:MathematicalModel`). These are looked up on the [MaRDI portal](https://portal.mardi4nfdi.de) automatically: the tool searches for items that are research problems (`P31 = Q6534292`) matching the benchmark name or a parenthetical in the doc-comment such as "(Taylor-Couette flow)" (MaRDI aliases like "rotating cylinders problem" match too), then follows the problem's `P1513` link to its mathematical model. Labels are taken from MaRDI, e.g. "Taylor–Couette flow" / "Taylor–Couette model".
+
+- A single match is used directly and reported in the output. If there are several, an interactive run asks you to pick one (or `n` to keep local ids); with `--skip-review` the placeholders are kept instead.
+- The answer is cached in `<module>/.semantic_links_cache.json`, so you're asked once per benchmark (`--clear-cache` asks again).
+- If the portal can't be reached or nothing matches, local placeholder ids are used and the run says so. `--no-mardi-lookup` turns the lookup off.
+- Explicit flags always win: `--research-problem-label` / `--research-problem-id` and `--math-model-label` / `--math-model-id` (also usable in a `--config` file), e.g.
+
+```bash
+    --research-problem-id https://portal.mardi4nfdi.de/entity/Q6830614 \
+    --math-model-id https://portal.mardi4nfdi.de/entity/Q6830616
+```
+
 For non-interactive/CI runs, add `--skip-review` (and make sure `--scenario-params` is always passed, since omitting it also triggers an interactive prompt) — this also skips the intro banner and the Outputs prompt/preview, silently reusing the module's last saved output selection (or generating everything, the first time). Skip individual pipeline steps with `--skip-show` / `--skip-check`. Run any script with `--help` for its full option list.
 
 ### Config files
@@ -176,6 +188,7 @@ benchmantic/
 │   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CMake discovery
 │   ├── parameters.py          #   parameter discovery + case resolution
 │   ├── metrics.py             #   output/solution metric discovery
+│   ├── mardi.py               #   MaRDI portal lookup (research problem / mathematical model)
 │   ├── publication.py         #   literature citation extraction
 │   └── software.py            #   simulation-software detection (DuMux, OpenFOAM, ...)
 ├── ai/                        # LLM-based semantic metadata inference
