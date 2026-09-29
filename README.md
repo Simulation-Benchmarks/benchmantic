@@ -45,7 +45,7 @@ workflow.py runs all of the above in one command
 - Assembles a [metadata4ing](https://w3id.org/nfdi4ing/metadata4ing)/RO-Crate 1.1-conformant `@graph` describing the benchmark, its parameter sets, metrics, and license, split across two files: `<benchmark-name>_benchmark.jsonld` (what `semantic_benchmark.BenchmarkLoader` reads) and a sidecar `<benchmark-name>_dataset.jsonld` (author, publisher, software dependencies).
 - Generates a plain `Snakefile` from that graph (not zipped), including optional radial-mesh-splitting support for rotating-cylinder-style benchmarks.
 - Renders the generated description as human-readable Markdown tables for manual review (merging in the sidecar dataset file automatically), with confidence scores and unit/quantityKind mix-ups flagged.
-- Validates the generated benchmark description against the real `semantic_benchmark.BenchmarkLoader`, not a reimplementation of its rules.
+- Validates the generated benchmark description against the SHACL shapes shipped with `semantic_benchmark` (`BenchmarkLoader.load_shapes()`), then loads it with the real `semantic_benchmark.BenchmarkLoader` for the runtime checks the shapes can't express.
 - Ships a single `workflow.py` command that runs the whole pipeline and mirrors the verification step's exit code, so it's CI-safe.
 
 ## Installation
@@ -62,13 +62,13 @@ pip install groq rdflib
 pip install openai
 ```
 
-`rdflib` is only needed for `verify_description.py`, which uses it via the `semantic_benchmark` package:
+`verify_description.py` needs the `semantic_benchmark` package, which provides the SHACL shapes and pulls in `rdflib` and `pyshacl`:
 
 ```bash
-git clone https://github.com/Simulation-Benchmarks/semantic-benchmark.git
+pip install semantic-benchmark
 ```
 
-`verify_description.py` auto-detects a sibling/child `./semantic-benchmark` checkout (or pass `--semantic-benchmark-src`, or set `SEMANTIC_BENCHMARK_SRC`) — no `pip install` of that package needed.
+A local clone still works instead (auto-detected as a sibling/child `./semantic-benchmark`, or pass `--semantic-benchmark-src` / set `SEMANTIC_BENCHMARK_SRC`), as long as it is recent enough to have `BenchmarkLoader.load_shapes()`.
 
 Optionally, install [`roc-validator`](https://github.com/crs4/rocrate-validator) to enable the automatic RO-Crate 1.1 conformance check that runs after generation:
 
@@ -155,7 +155,7 @@ Any flag either script accepts can go in the file (keys use the flag name with o
 Two additional scripts sit downstream of generation:
 
 - **`show_description.py`** loads the benchmark file, auto-discovers its sibling `_dataset.jsonld` file next to it (or takes `--dataset-jsonld` explicitly), and renders both together as Markdown tables (manifest info, dependencies, parameters, metrics) for human review, flagging any unit/quantityKind mix-ups. Unlike the interactive review step, this reflects the fully built graph — including manifest fields (license, authors, dependencies) and resolved case values that review never touches — and is saved to disk (`review.md`) as a durable record. Run directly, it always prints the rendered table to the terminal too; called in-process the way `describe_benchmark.py` and `workflow.py` both do (for every Outputs preset except **Workflow only**, the same way the benchmark description itself is written for every preset but that one), it's passed `--quiet` so the table is saved to `review.md` but not also echoed to the terminal, since both callers already list `review.md` among the run's generated files right afterward -- printing the whole table inline (potentially twice, once per caller) was mostly noise to scroll past. If you want to see it on screen, run `show_description.py <benchmark-file>.jsonld` directly (or drop `--quiet` from a `--config` invocation calling it yourself). If the dataset sidecar wasn't generated that run, `review.md` still gets written, just without the manifest/dependency sections that come from it -- covering only the benchmark's own input parameters and output metrics. In **Workflow only** mode neither `review.md` nor `verify_description.py` runs at all (`workflow.py` skips that whole downstream chain with a printed explanation, since there's no `benchmark.jsonld` to feed it).
-- **`verify_description.py`** loads the benchmark file (not the dataset sidecar -- it has no bearing on the check) with the real `semantic_benchmark.BenchmarkLoader` and checks that every processing step, parameter set, and metric field mapping actually resolves — not just that the file is valid JSON-LD.
+- **`verify_description.py`** validates the benchmark file (not the dataset sidecar -- it has no bearing on the check) in two stages. First, SHACL: it runs `pyshacl` against the shapes bundled with `semantic_benchmark` and prints every violation, grouped by constraint with the offending nodes listed; any violation fails the run. (The loader runs these shapes too, but only writes a `.shacl.log` next to the file and never fails, so this script reports them itself.) Second, it loads the file with the real `semantic_benchmark.BenchmarkLoader` and checks what the shapes don't cover: at least one processing step, a value on every parameter, and a resolvable field mapping for every metric. Options: `--shacl-only` skips the second stage, `--shapes FILE.ttl` validates against a different shapes file, `--report FILE` saves pyshacl's full report, and `--export-shapes FILE.ttl` writes the shapes out as Turtle (e.g. to include in an LLM prompt).
 
 To fix a value after the fact (e.g. a run done with `--skip-review`, or something spotted later in `review.md`): edit the relevant entry in `.parameter_metadata_cache.json` (or `.metric_metadata_cache.json`) inside the module directory, then re-run `describe_benchmark.py` **without** `--clear-cache` so the fix is reused rather than re-inferred, and re-run `verify_description.py` to confirm.
 

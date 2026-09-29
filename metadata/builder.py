@@ -78,7 +78,10 @@ DEFAULT_CONTEXT = {
     "cr": "http://mlcommons.org/croissant/",
     "qudt": "http://qudt.org/schema/qudt/",
     "m4i": "http://w3id.org/nfdi4ing/metadata4ing#",
-    "mathmod": "https://mardi4nfdi.de/mathmoddb#",
+    # NOTE: must match the namespace semantic_benchmark's SHACL shapes use
+    # (BenchmarkLoader.load_shapes()) -- otherwise the ResearchProblem node
+    # is typed with a different IRI and m4i:investigates fails sh:class.
+    "mathmod": "https://mardi4nfdi.github.io/MathModDB/",
     "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
     # NOTE: these two were previously missing, which silently broke any
     # JSON-LD consumer resolving CURIEs properly (e.g. semantic_benchmark's
@@ -132,7 +135,9 @@ DEFAULT_CONTEXT = {
     # run_benchmark.py's create_parameter_files_from_benchmark() skip every
     # single configuration (it requires a truthy identifier).
     "identifier": {"@id": "m4i:identifier"},
-    "dataType": {"@id": "cr:dataType"},
+    # m4i:dataType (not cr:dataType) -- that's what semantic_benchmark's
+    # vocabulary (DATA_TYPE) and its cr:Field SHACL shape both require.
+    "dataType": {"@id": "m4i:dataType"},
     "name": {"@id": "schema:name"},
     "description": {"@id": "schema:description"},
     "datePublished": {"@id": "schema:datePublished"},
@@ -324,9 +329,11 @@ class GraphBuilder:
     def _ensure_extract_node(self, key: str) -> str:
         extract_id = f"local:extract_{key}"
         if extract_id not in self._extract_nodes:
+            # Deliberately untyped: this is the object of cr:extract, not a
+            # data source itself. Typing it cr:DataSource made the SHACL
+            # DataSource shape demand its own cr:extract + cr:fileObject.
             self.graph.append({
                 "@id": extract_id,
-                "@type": "cr:DataSource",
                 "jsonPath": f"/{key}",
             })
             self._extract_nodes.add(extract_id)

@@ -34,13 +34,13 @@ cd benchmantic
 pip install groq rdflib
 ```
 
-`groq` is the default LLM provider (free tier). To use OpenAI instead, `pip install openai` and pass `--provider openai` (plus `--model`, optionally). `rdflib` is needed for `verify_description.py`, which also needs a `semantic-benchmark` checkout:
+`groq` is the default LLM provider (free tier). To use OpenAI instead, `pip install openai` and pass `--provider openai` (plus `--model`, optionally). `verify_description.py` needs the `semantic_benchmark` package (brings `rdflib` and `pyshacl`):
 
 ```bash
-git clone https://github.com/Simulation-Benchmarks/semantic-benchmark.git
+pip install semantic-benchmark
 ```
 
-(auto-detected as a sibling/child directory, or pass `--semantic-benchmark-src` / set `SEMANTIC_BENCHMARK_SRC`). `pip install pyyaml` too, only if you use `--config`.
+(a local clone also works: auto-detected as a sibling/child directory, or pass `--semantic-benchmark-src` / set `SEMANTIC_BENCHMARK_SRC`). `pip install pyyaml` too, only if you use `--config`.
 
 ## Quickstart
 
@@ -69,7 +69,7 @@ python3 workflow.py <module_dir> \
 Review and verify the result downstream of generation -- run individually, or (for `show_description.py`) called in-process by `describe_benchmark.py` itself whenever `review.md` is included in the Outputs selection (i.e. every preset except **Workflow only** -- `workflow.py` skips both this and `verify_description.py` for that mode, printing why, since there's no `benchmark.jsonld` to feed either one):
 
 - `show_description.py <benchmark-name>_benchmark.jsonld` auto-discovers the sibling `_dataset.jsonld` file next to it and renders both together as Markdown tables — including manifest fields (license, authors, dependencies) and resolved case values the interactive review step doesn't cover — saved to `review.md` as a durable record, and printed to the terminal too when run this way (directly). Called in-process by `describe_benchmark.py`/`workflow.py` (as above), it's passed `--quiet` so the table is still saved to `review.md` but not also echoed to the terminal on top of it -- both callers already list `review.md` among the generated files right afterward, so printing the whole table inline (potentially twice, once per caller) was mostly noise; pass `--quiet` yourself, or drop it, when calling `show_description.run()`/the CLI directly. Without a dataset sidecar (the "Description only"/"Snakefile" Outputs presets), those manifest sections are simply omitted -- the report still covers the benchmark's own input parameters and output metrics.
-- `verify_description.py <benchmark-name>_benchmark.jsonld` loads it with the real `semantic_benchmark.BenchmarkLoader` and confirms every parameter set and metric field mapping resolves (the dataset sidecar isn't involved in this check).
+- `verify_description.py <benchmark-name>_benchmark.jsonld` validates it against the SHACL shapes from `semantic_benchmark` (any violation fails), then loads it with the real `semantic_benchmark.BenchmarkLoader` and confirms every processing step, parameter value and metric field mapping resolves (the dataset sidecar isn't involved). `--shacl-only` skips the loader stage; `--export-shapes FILE.ttl` writes the shapes out as Turtle.
 
 To fix a value after the fact (e.g. a `--skip-review` run, or something spotted later in `review.md`): edit the relevant entry in `.parameter_metadata_cache.json` (or `.metric_metadata_cache.json`) inside the module directory, re-run `describe_benchmark.py` **without** `--clear-cache` so the fix is reused, then re-run `verify_description.py` to confirm.
 
@@ -77,7 +77,7 @@ To fix a value after the fact (e.g. a `--skip-review` run, or something spotted 
 
 - `describe_benchmark.py` — entry point; orchestrates metadata + Snakefile generation.
 - `show_description.py` — renders the benchmark file (merged with its sibling dataset file) as Markdown.
-- `verify_description.py` — validates the benchmark jsonld file against `semantic_benchmark`.
+- `verify_description.py` — validates the benchmark jsonld file against the `semantic_benchmark` SHACL shapes and loader.
 - `workflow.py` — runs the scripts above as one CI-friendly pipeline.
 - `config.py` — optional `--config` YAML support, shared by `workflow.py` and `describe_benchmark.py`.
 - `utils.py` — shared string/number/file helpers.
