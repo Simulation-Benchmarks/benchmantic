@@ -19,7 +19,7 @@ Pipeline: **discover → infer → review → build → validate**. AI inference
 Use this skill when the task involves any of:
 
 - Extracting a semantic description (`benchmark.jsonld`) from a simulation model's source code or repository -- DuMux or OpenFOAM (detected automatically; `--software` overrides).
-- Adding another implementation (e.g. OpenFOAM) to an existing benchmark description: `--reference-benchmark <benchmark.jsonld>` maps the software's inputs onto the reference's software-neutral parameters (LLM-proposed expressions, checked against every configuration, reviewed) and writes `<name>_mapping.json`.
+- Describing another implementation of an existing benchmark: every run looks for a reference benchmark (`--reference-benchmark`, else a benchmark description in the repository, else benchmantic's earlier output for another software with the same name; `--no-reference` to skip). With one, the software's reviewed parameters are mapped onto the reference's (LLM-proposed expressions, checked against every configuration, unit mismatches flagged, reviewed) and written to `<name>_mapping.json`; without one, parameters are named from scratch.
 - Inferring units, quantity kinds, or semantic names for simulation parameters/metrics from source code context.
 - Reviewing/editing AI-inferred metadata before it's committed to a benchmark description.
 - Rendering an existing `benchmark.jsonld` as a human-readable Markdown table for review.
@@ -93,7 +93,7 @@ To fix a value after the fact (e.g. a `--skip-review` run, or something spotted 
 - **Missing required Snakefile flags**: `--container-image` and `--container-shared-dir` are required even if you only care about the `benchmark.jsonld` output.
 - **Verification failures**: a failing `verify_description.py` run should block downstream packaging/publishing — `workflow.py` already propagates this as a non-zero exit code.
 - **Rotating-cylinder / radial-mesh benchmarks**: only enable `--mesh-split` (and its `--radial-cells-flag`/`--angular-cells-flag`/`--grading-flag`) when the benchmark actually uses a radial mesh; it's not a general-purpose flag.
-- **OpenFOAM template cases** (placeholders like `{omega}`, as in `output_template.zip`) have no values of their own: pass `--reference-benchmark` so the configurations come from the reference, or point `module_dir` at a case with concrete values.
+- **OpenFOAM template cases** (placeholders like `{omega}`, as in `output_template.zip`) have no values of their own: they need a reference benchmark (found automatically in the catalog repository), or point `module_dir` at a case with concrete values.
 - **Parameter names changed**: descriptions now use software-neutral names by default (plus `<name>_mapping.json`); pass `--parameter-names software` to keep the old `Section.Key` names.
 - **A benchmark parameter "not used by any input"** in reference mode means that implementation ignores it (e.g. OpenFOAM rotating-cylinders keeps the outer cylinder fixed) -- fine only while every configuration uses the value the software has built in.
 - **Missing API key**: `GROQ_API_KEY` (or `OPENAI_API_KEY` with `--provider openai`) must be set before the inference step runs.

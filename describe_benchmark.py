@@ -422,6 +422,7 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         no_mardi_lookup=args.no_mardi_lookup,
         software=args.software,
         reference_benchmark=args.reference_benchmark,
+        no_reference=args.no_reference,
         parameter_names=args.parameter_names,
         scenario_params=args.scenario_params,
         full_value_params=args.full_value_params,

@@ -164,19 +164,28 @@ The software is detected from the files (override with `--software dumux|openfoa
 
 Each simulation code is an *adapter* in `metadata/adapters/`; adding another code means implementing one class (find the module, list inputs, metrics and cases).
 
-**Parameter names.** The description names parameters software-neutrally, so descriptions of the same benchmark in different codes line up. The link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. There are two ways to get the neutral names:
+**Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:
 
-- **First implementation of a benchmark** (default): the reviewed semantic name of each input becomes its name (e.g. `angular_velocity_inner_cylinder`), mapped 1:1 to the input. `--parameter-names software` keeps the software's own names instead (the previous behaviour; no mapping file).
-- **Another implementation of an existing benchmark**: `--reference-benchmark benchmark/1.0.0/minimal-configurations.json`. The description takes the reference's parameters, units and configurations, so it matches the reference exactly. The LLM proposes, for each selected software input, an expression over the reference's parameters -- a Python f-string body, e.g.
+1. `--reference-benchmark FILE` (or `reference-benchmark:` in the config), if given;
+2. otherwise a benchmark description in the repository (a JSON-LD file with an `m4i:Benchmark` and parameter sets, e.g. the catalog's `benchmark/1.0.0/minimal-configurations.json`; with several, one with the same benchmark name, else the highest version folder);
+3. otherwise benchmantic's earlier output for **another** software with the same benchmark name (`outputs/<software>/*_benchmark.jsonld`) -- so describing DuMux first and OpenFOAM second maps OpenFOAM onto DuMux's parameters.
+
+`--no-reference` (`no-reference: true`) skips the search.
+
+- **No reference:** parameters are named from scratch -- the reviewed semantic name of each input (e.g. `angular_velocity_inner_cylinder`), mapped 1:1 to the input. `--parameter-names software` keeps the software's own names instead (the previous behaviour; no mapping file).
+- **Reference found:** the usual inference and review of the software's inputs runs first (semantic names, units). The LLM then maps those reviewed parameters onto the reference's parameters, as an expression per input -- a Python f-string body, e.g.
 
   | Input | Expression |
   |---|---|
   | DuMux `Grid.Cells0` | `{cells_radial // 2} {cells_radial // 2}` |
   | DuMux `Grid.Radial0` | `{inner_radius} {(inner_radius + outer_radius) / 2} {outer_radius}` |
   | OpenFOAM `geom/ntheta` | `{cells_angular // 4}` |
+  | OpenFOAM `geom/r0` (onto a DuMux-generated reference) | `{tokens(radial_coordinates)[0]}` |
   | OpenFOAM `transportModel` | *(not mapped -- keeps its own value)* |
 
-  Expressions are restricted to parameter names, numbers, arithmetic and a few functions. They are evaluated for every reference configuration, compared with the template's own values where it has them, and shown for review (Enter accepts, a row number edits). Reference parameters no input uses are reported -- e.g. the OpenFOAM rotating-cylinders case keeps the outer cylinder fixed, so `angular_velocity_outer_cylinder` is flagged as ignored. Metrics the reference defines keep its units; only new ones are inferred. The mapping is cached in `<module>/.parameter_mapping_cache.json`.
+  Expressions may use parameter names, numbers, arithmetic, a few functions, and `tokens(name)[i]` to pick one value of a multi-value parameter. They are evaluated for every reference configuration and compared with the template's own values where it has them; an input whose reviewed unit differs from its parameter's (e.g. degrees vs radians) is flagged. Then the mapping review (same screen style as the semantic review) lets you accept or edit each expression. Reference parameters no input uses are reported -- e.g. the OpenFOAM rotating-cylinders case keeps the outer cylinder fixed, so `angular_velocity_outer_cylinder` is flagged as ignored. The description takes the reference's parameters, units and configurations, so it lines up with the reference; metrics the reference defines keep its units. The mapping is cached in `<module>/.parameter_mapping_cache.json`.
+
+**OpenFOAM template cases** (placeholders like `{omega}`, as in the catalog's `output_template.zip`) have no values of their own: they need a reference (in the catalog repository one is found automatically), or point `module_dir` at a case with concrete values.
 
 The generated Snakefile reads the neutral names from `parameters.json` (as written by the catalog's `run_benchmark.py`, including unit suffixes such as `inner_radius[m]` and `angular_velocity_inner_cylinder[rad/s]`) and sets each input from its expression: DuMux gets `-Section.Key "<value>"` flags; OpenFOAM gets its placeholders filled in (`X.template` -> `X`) or entries set with `foamDictionary`, then runs `Allrun` (or `blockMesh` + the solver) and the metrics script. `--mesh-split` still works with 1:1 mappings; with a reference, the expressions replace it.
 

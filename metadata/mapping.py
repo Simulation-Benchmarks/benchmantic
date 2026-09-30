@@ -37,9 +37,25 @@ from typing import Any
 
 MAPPING_SUFFIX = "_mapping.json"
 _FIELD_PATTERN = re.compile(r"\{([^{}]+)\}")
+def tokens(value: Any) -> list:
+    """The values of a multi-value parameter as a list of numbers (text
+    tokens stay text): tokens("1.0 1.5 2.0") -> [1.0, 1.5, 2.0], so an
+    expression can pick one, e.g. {tokens(radial_coordinates)[0]}. The
+    generated Snakefile defines the same function."""
+    items = value if isinstance(value, (list, tuple)) else str(value).replace("(", " ").replace(")", " ").split()
+    out = []
+    for item in items:
+        try:
+            num = float(item)
+            out.append(int(num) if num.is_integer() and "." not in str(item) else num)
+        except (TypeError, ValueError):
+            out.append(item)
+    return out
+
+
 _ALLOWED_FUNCS = {"int": int, "float": float, "round": round, "abs": abs, "min": min, "max": max,
-                  "str": str, "sqrt": math.sqrt, "pi": math.pi}
-_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Load, ast.Call,
+                  "str": str, "sqrt": math.sqrt, "pi": math.pi, "tokens": tokens, "len": len}
+_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Load, ast.Call, ast.Subscript,
                   ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow, ast.USub, ast.UAdd,
                   ast.IfExp, ast.Compare, ast.Gt, ast.GtE, ast.Lt, ast.LtE, ast.Eq, ast.NotEq)
 
@@ -82,6 +98,10 @@ def check_expression(expression: str, parameters: set[str]) -> str | None:
                 return f"'{{{f}}}' uses {type(node).__name__}, which isn't allowed"
             if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in _ALLOWED_FUNCS):
                 return f"'{{{f}}}' calls a function that isn't allowed"
+            if isinstance(node, ast.Subscript) and not (
+                    isinstance(node.value, ast.Call) and getattr(node.value.func, "id", None) == "tokens"):
+                return (f"'{{{f}}}' indexes a parameter directly -- use tokens(name)[i] to pick one value "
+                        "of a multi-value parameter")
         unknown = expression_names(f"{{{f}}}") - parameters
         if unknown:
             return f"unknown benchmark parameter(s): {', '.join(sorted(unknown))}"

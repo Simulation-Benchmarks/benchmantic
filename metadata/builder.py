@@ -56,7 +56,7 @@ from metadata.mapping import (
     InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
     input_display, neutral_name, render, template_consistency,
 )
-from metadata.reference import load_reference
+from metadata.reference import discover_reference, load_reference
 from ai.mapping import infer_parameter_mapping
 from metadata.publication import extract_publication_citation, extract_publication_doi
 from metadata.repository import (
@@ -1323,13 +1323,18 @@ def add_semantic_override_args(ap) -> None:
 def add_mapping_args(ap) -> None:
     """--reference-benchmark / --parameter-names, shared with describe_benchmark.py."""
     ap.add_argument("--reference-benchmark", type=Path, default=None, metavar="JSONLD",
-                    help="An existing description of the same benchmark (e.g. the catalog's "
-                         "benchmark/<version>/minimal-configurations.json). Its software-neutral "
-                         "parameters and configurations are used, and this software's inputs are "
-                         "mapped onto them (LLM-proposed, checked and reviewed; see "
-                         "<name>_mapping.json).")
+                    help="An existing description of the same benchmark to map onto. Default: looked "
+                         "for automatically -- a benchmark description in the repository (e.g. "
+                         "benchmark/<version>/minimal-configurations.json), else benchmantic's earlier "
+                         "output for another software with the same benchmark name "
+                         "(outputs/<software>/*_benchmark.jsonld). With a reference, this software's "
+                         "reviewed parameters are mapped onto its parameters (LLM-proposed, checked, "
+                         "reviewed; see <name>_mapping.json); without one, parameters are named from "
+                         "scratch.")
+    ap.add_argument("--no-reference", action="store_true",
+                    help="Don't look for a reference benchmark; name parameters from scratch.")
     ap.add_argument("--parameter-names", choices=["neutral", "software"], default="neutral",
-                    help="Without --reference-benchmark: name parameters in the description by their "
+                    help="Without a reference benchmark: name parameters in the description by their "
                          "reviewed semantic name ('neutral', default, e.g. inner_radius) with a 1:1 "
                          "mapping file to the software inputs, or by the software's own input names "
                          "('software', e.g. Grid.Radial0; the previous behaviour).")
@@ -1498,11 +1503,6 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     if not args.module_dir.is_dir():
         sys.exit(f"Error: {args.module_dir} is not a directory")
 
-    ref_path = getattr(args, "reference_benchmark", None)
-    if ref_path is not None and not Path(ref_path).is_file():
-        sys.exit(f"Error: --reference-benchmark {ref_path} does not exist "
-                 f"(relative paths are resolved from {Path.cwd()}).")
-
     _print_step_header(1, "Discover benchmark")
 
     # 1. Path Resolution -- module_dir may be the exact benchmark folder or a
@@ -1592,6 +1592,16 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     benchmark_description = adapter.benchmark_description(module_dir, texts)
     if not benchmark_description and readme_path:
         benchmark_description = extract_readme_description(read_text(readme_path))
+
+    # Is there already a description of this benchmark to map onto?
+    benchmark_label = adapter.benchmark_label(module_dir, docs_root, texts)
+    reference, reference_source = _find_reference(args, adapter, docs_root, benchmark_label)
+    if reference is not None:
+        ref_line = (f"Reference benchmark: {reference.label or reference.path.name} ({reference.summary()}) "
+                    f"-- {reference_source}: {reference.path}")
+    else:
+        ref_line = "No reference benchmark -- parameters are named from scratch"
+    print(ref_line if args.verbose else f"  {'✓' if reference is not None else '○'} {ref_line}")
 
     _print_step_header(2, "Select parameters")
 
@@ -1763,13 +1773,9 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     print(f"-> {_describe_outputs_selection(outputs_selection)}")
     skip_inference = not outputs_selection.get("description", True)
 
-    reference = None
-    if getattr(args, "reference_benchmark", None):
-        if skip_inference:
-            sys.exit("Error: --reference-benchmark needs the benchmark description output "
-                     "(it can't be combined with the Snakefile-only preset).")
-        reference = load_reference(args.reference_benchmark)
-        print(f"Reference benchmark: {reference.label or args.reference_benchmark} ({reference.summary()})")
+    if reference is not None and skip_inference:
+        print("note: the reference benchmark isn't used in Snakefile-only mode.")
+        reference = None
 
     _print_step_header(4, "Infer & review")
     if skip_inference:
@@ -1804,22 +1810,23 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         final_metric_metadata = []
         metric_keys = []
     elif reference is not None:
-        # Parameters come from the reference; this software's selected
-        # inputs are mapped onto them. Metrics the reference defines keep
-        # its units; only new ones are inferred.
-        mapped_inputs = _map_to_reference(args, module_dir, adapter, selected_candidates, reference,
-                                          benchmark_description)
+        # 1. The usual inference + review of this software's own inputs
+        #    (semantic names, units) and metrics -- metrics the reference
+        #    defines keep its units.
+        # 2. Those reviewed parameters are mapped onto the reference's
+        #    parameters, which the description then uses.
         known_metrics = {
             name: {"key": name, "semantic_name": name, "datatype": "schema:Double", "unit": info["unit"],
                    "quantityKind": info.get("quantityKind"), "confidence": 1.0,
                    "explanation": info.get("description") or "Taken from the reference benchmark."}
             for name, info in reference.metrics.items()
         }
-        final_metadata = []
-        _, final_metric_metadata, metric_keys = _infer_and_review(
-            args, module_dir, repo_root, adapter, texts, [], raw_candidates,
+        final_metadata, final_metric_metadata, metric_keys = _infer_and_review(
+            args, module_dir, repo_root, adapter, texts, selected_candidates, raw_candidates,
             benchmark_description, known_metrics=known_metrics,
         )
+        mapped_inputs = _map_to_reference(args, module_dir, adapter, selected_candidates, reference,
+                                          benchmark_description, final_metadata)
         missing_metrics = sorted(set(reference.metrics) - set(metric_keys))
         if missing_metrics:
             print(f"warning: the reference benchmark's metric(s) {', '.join(missing_metrics)} are not "
@@ -1873,8 +1880,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         read_text(readme_path) if readme_path else "",
         read_text(authors_path) if authors_path else "",
         authors_path.name if authors_path else None,
-        label=(reference.label if reference is not None and reference.label else None)
-              or adapter.benchmark_label(module_dir, docs_root, texts),
+        label=(reference.label if reference is not None and reference.label else None) or benchmark_label,
         software_label=adapter.name,
         citation_cff=citation_cff,
     )
@@ -1997,6 +2003,24 @@ def _guess_static_datatype(raw_value: str) -> str:
     return "schema:String"
 
 
+def _find_reference(args, adapter, docs_root: Path, benchmark_label: str | None):
+    """(reference or None, where it came from): --reference-benchmark if
+    given, nothing with --no-reference, otherwise automatic discovery (see
+    metadata.reference.discover_reference)."""
+    if getattr(args, "no_reference", False):
+        return None, ""
+    explicit = getattr(args, "reference_benchmark", None)
+    if explicit is not None:
+        if not Path(explicit).is_file():
+            sys.exit(f"Error: --reference-benchmark {explicit} does not exist "
+                     f"(relative paths are resolved from {Path.cwd()}).")
+        return load_reference(Path(explicit)), "given"
+    reference, source, others = discover_reference(docs_root, benchmark_label, adapter.slug)
+    if reference is not None and others and getattr(args, "verbose", False):
+        print("  other benchmark descriptions found (not used): " + ", ".join(str(o) for o in others))
+    return reference, source
+
+
 MAPPING_CACHE = ".parameter_mapping_cache.json"
 
 
@@ -2005,10 +2029,14 @@ def _placeholder_of(candidate) -> str | None:
     return m.group(1) if m else None
 
 
-def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, benchmark_description: str) -> list:
-    """Map the selected software inputs onto the reference benchmark's
-    parameters: cached answers first, then the LLM for the rest, then an
-    interactive review. Returns [InputMapping, ...] in candidate order."""
+def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, benchmark_description: str,
+                      semantics: list[dict] | None = None) -> list:
+    """Map the selected software inputs -- with their reviewed semantic
+    names and units (`semantics`, the inference/review result) -- onto the
+    reference benchmark's parameters: cached answers first, then the LLM for
+    the rest, a unit check, then the mapping review. Returns
+    [InputMapping, ...] in candidate order."""
+    semantic_by_key = {(s["ini"][0], s["ini"][1]): s for s in (semantics or [])}
     names = sorted(reference.parameters)
     cache_file = module_dir / MAPPING_CACHE
     if getattr(args, "clear_cache", False) and cache_file.exists():
@@ -2027,6 +2055,7 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
         try:
             answers = infer_parameter_mapping(
                 candidates=missing,
+                semantics=semantic_by_key,
                 reference_parameters=reference.parameters,
                 example_values=reference.configurations[0]["values"] if reference.configurations else {},
                 software=adapter.name,
@@ -2059,6 +2088,7 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
             explanation=a.get("explanation", ""), placeholder=_placeholder_of(c),
         ))
 
+    _flag_unit_mismatches(result, semantic_by_key, reference)
     if not args.skip_review and sys.stdin.isatty():
         result = _review_mapping_screen(result, reference, args) or _review_mapping(result, reference)
     for m in result:
@@ -2066,6 +2096,31 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
                                                "confidence": m.confidence, "explanation": m.explanation}
     cache_file.write_text(json.dumps({"reference_parameters": names, "items": items}, indent=2), encoding="utf-8")
     return result
+
+
+def _unit_id(unit: str | None) -> str:
+    u = (unit or "unit:UNITLESS").strip()
+    for prefix in ("http://qudt.org/vocab/unit/", "https://qudt.org/vocab/unit/", "unit:"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+    return u.upper()
+
+
+def _flag_unit_mismatches(inputs: list, semantic_by_key: dict, reference) -> None:
+    """An input set straight from one benchmark parameter ('{name}') should
+    have that parameter's unit. If the reviewed unit differs (e.g. DEG vs
+    RAD), lower the confidence so the mapping review flags it, and say why."""
+    for m in inputs:
+        fields = re.fullmatch(r"\{\s*(\w+)\s*\}", (m.expression or "").strip())
+        sem = semantic_by_key.get((m.section, m.key))
+        if not fields or not sem or fields.group(1) not in reference.parameters:
+            continue
+        ref_unit = reference.parameters[fields.group(1)].get("unit")
+        if _unit_id(sem.get("unit")) != _unit_id(ref_unit):
+            m.confidence = min(m.confidence if m.confidence is not None else 1.0, 0.5)
+            note = (f"unit check: this input is in {_unit_id(sem.get('unit'))}, the benchmark parameter "
+                    f"{fields.group(1)} in {_unit_id(ref_unit)} -- a conversion may be needed.")
+            m.explanation = f"{m.explanation} {note}".strip() if note not in (m.explanation or "") else m.explanation
 
 
 def _review_mapping_screen(inputs: list, reference, args) -> list | None:

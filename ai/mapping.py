@@ -37,16 +37,23 @@ benchmark parameter names. Examples:
   "{mesh_grading} -{mesh_grading}"                          grading mirrored in the second zone
   "{cells_angular // 4}"                                    mesh made of 4 blocks
 Allowed inside {...}: benchmark parameter names, numbers, + - * / // % **,
-parentheses, and int() float() round() abs() min() max() sqrt(). Nothing else.
+parentheses, and int() float() round() abs() min() max() sqrt() len(). A
+benchmark parameter holding several values (e.g. "1.0 1.5 2.0") can be
+indexed with tokens(): {tokens(radial_coordinates)[0]} is its first value,
+{tokens(radial_coordinates)[-1]} its last. Nothing else.
 
 Use "expression": null when the input is NOT determined by any benchmark
 parameter (solver settings, output names, physics switches the benchmark
 doesn't vary) -- it then keeps its own value. Never invent a benchmark
 parameter; only use names from the list you are given.
 
-Use each input's template value and code context as evidence: e.g. a
-template value "40 40" for a cell count, when the benchmark has
-cells_radial, means two zones sharing the radial cells.
+Each input comes with its reviewed "semantic_name", "unit" and
+"quantity_kind" (what the software input means, confirmed by a human) --
+match primarily on that meaning and on the units. Use the template value and
+code context as further evidence: e.g. a template value "40 40" for a cell
+count, when the benchmark has cells_radial, means two zones sharing the
+radial cells. If the input's unit differs from the benchmark parameter's
+(e.g. degrees vs radians), include the conversion in the expression.
 
 Respond with a raw JSON array only (first character '[', last ']'), one
 object per input, no markdown fences, no prose:
@@ -75,14 +82,21 @@ Return the JSON array now.
 
 
 def build_mapping_prompt(candidates, reference_parameters: dict[str, dict[str, Any]],
-                         example_values: dict[str, Any], software: str, benchmark_description: str) -> str:
+                         example_values: dict[str, Any], software: str, benchmark_description: str,
+                         semantics: dict | None = None) -> str:
+    semantics = semantics or {}
     params = [
         {"name": name, "unit": info.get("unit"), "quantityKind": info.get("quantityKind"),
          "example_value": example_values.get(name), "description": info.get("description") or None}
         for name, info in reference_parameters.items()
     ]
     inputs = [
-        {"ini": [c.section, c.key], "template_value": c.value, "hint": c.cpp_hint or None,
+        {"ini": [c.section, c.key],
+         "semantic_name": (semantics.get((c.section, c.key)) or {}).get("semantic_name"),
+         "unit": (semantics.get((c.section, c.key)) or {}).get("unit"),
+         "quantity_kind": (semantics.get((c.section, c.key)) or {}).get("quantityKind"),
+         "meaning": (semantics.get((c.section, c.key)) or {}).get("explanation") or None,
+         "template_value": c.value, "hint": c.cpp_hint or None,
          "code_context": c.code_context or None}
         for c in candidates
     ]
@@ -131,6 +145,7 @@ def validate_mapping(data: Any, candidates, parameter_names: set[str]) -> list[d
 def infer_parameter_mapping(
     *,
     candidates,
+    semantics: dict | None = None,
     reference_parameters: dict[str, dict[str, Any]],
     example_values: dict[str, Any],
     software: str,
@@ -147,7 +162,8 @@ def infer_parameter_mapping(
         provider=provider,
         model=model,
         system_prompt=MAPPING_SYSTEM_PROMPT,
-        prompt=build_mapping_prompt(candidates, reference_parameters, example_values, software, benchmark_description),
+        prompt=build_mapping_prompt(candidates, reference_parameters, example_values, software,
+                                    benchmark_description, semantics),
         item_count=len(candidates),
         item_label="input mapping",
         validator=lambda data: validate_mapping(data, candidates, names),

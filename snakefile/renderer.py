@@ -287,11 +287,27 @@ RESERVED_NAMES = {"config", "json", "Path", "shell", "workflow", "rules", "conf_
                   "snakefile_dir", "application", "metrics_script"}
 
 
+#: Same helper as metadata.mapping.tokens(), for expressions like
+#: {tokens(radial_coordinates)[0]} (one value of a multi-value parameter).
+TOKENS_HELPER = '''def tokens(value):
+    items = value if isinstance(value, (list, tuple)) else str(value).replace("(", " ").replace(")", " ").split()
+    out = []
+    for item in items:
+        try:
+            num = float(item)
+            out.append(int(num) if num.is_integer() and "." not in str(item) else num)
+        except (TypeError, ValueError):
+            out.append(item)
+    return out
+'''
+
+
 def _parameter_assignments(names: list[str], units: dict[str, str], unit_symbols: dict[str, str]) -> str:
-    clash = sorted(set(names) & RESERVED_NAMES)
+    clash = sorted(set(names) & (RESERVED_NAMES | {"tokens"}))
     if clash:
         raise SystemExit(f"Error: benchmark parameter name(s) {clash} clash with Snakefile variables; rename them.")
-    return "\n".join(f"{n} = config[{config_key(n, units.get(n), unit_symbols)!r}]" for n in names)
+    lines = [f"{n} = config[{config_key(n, units.get(n), unit_symbols)!r}]" for n in names]
+    return TOKENS_HELPER + "\n" + "\n".join(lines)
 
 
 def render_mapped_dumux_snakefile(mapping: dict[str, Any], executable: str, build_dir: str,

@@ -119,3 +119,89 @@ def load_reference(path: Path) -> ReferenceBenchmark:
     if not ref.parameters:
         raise SystemExit(f"Error: the reference benchmark {path} has no parameter values to map onto.")
     return ref
+
+
+# ---------------------------------------------------------------------------
+# Finding a reference benchmark automatically
+# ---------------------------------------------------------------------------
+
+#: Folders never searched for benchmark descriptions.
+SKIP_DIRS = {".git", ".benchmantic", "node_modules", "outputs", "results", "build", "build-cmake",
+             "__pycache__", ".venv", "venv"}
+MAX_FILE_BYTES = 5_000_000
+
+
+def _version_key(path: Path) -> tuple:
+    """Sort key preferring higher version folders (benchmark/1.10.0 > 1.9.0)."""
+    parts = []
+    for part in path.parts:
+        nums = [int(n) for n in part.split(".") if n.isdigit()] if part.replace(".", "").isdigit() else []
+        parts.append(tuple(nums))
+    return tuple(parts)
+
+
+def _looks_like_benchmark(path: Path) -> bool:
+    try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return False
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "Benchmark" in text and ("hasParameterSet" in text or "has parameter set" in text)
+
+
+def _try_load(path: Path) -> ReferenceBenchmark | None:
+    try:
+        return load_reference(path)
+    except SystemExit:
+        return None
+
+
+def _same_name(a: str | None, b: str | None) -> bool:
+    norm = lambda s: " ".join((s or "").lower().replace("_", " ").replace("-", " ").split())  # noqa: E731
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
+def repository_candidates(root: Path) -> list[Path]:
+    found = []
+    for path in root.rglob("*"):
+        if path.suffix not in (".json", ".jsonld") or not path.is_file():
+            continue
+        rel = path.relative_to(root).parts
+        if any(p in SKIP_DIRS or (p.startswith(".") and p != ".") for p in rel[:-1]):
+            continue
+        if _looks_like_benchmark(path):
+            found.append(path)
+    return found
+
+
+def discover_reference(docs_root: Path, benchmark_label: str | None, software_slug: str,
+                       outputs_root: Path | None = None) -> tuple[ReferenceBenchmark | None, str, list[Path]]:
+    """Look for a reference benchmark description:
+
+    1. in the repository (a JSON-LD file with an m4i:Benchmark and parameter
+       sets, e.g. benchmark/1.0.0/minimal-configurations.json); with several,
+       one whose name matches the benchmark, else the highest version folder;
+    2. among benchmantic's earlier outputs for another software with the same
+       benchmark name (outputs/<software>/*_benchmark.jsonld).
+
+    Returns (reference or None, where it was found, other candidates seen).
+    """
+    repo = [(p, r) for p in repository_candidates(docs_root) if (r := _try_load(p))]
+    if repo:
+        named = [(p, r) for p, r in repo if _same_name(r.label, benchmark_label)]
+        pool = named or repo
+        pool.sort(key=lambda pr: (("benchmark" in pr[0].parts), _version_key(pr[0])), reverse=True)
+        chosen = pool[0]
+        others = [p for p, _ in repo if p != chosen[0]]
+        return chosen[1], "in the repository", others
+
+    outputs_root = outputs_root or Path("outputs")
+    if outputs_root.is_dir():
+        for path in sorted(outputs_root.glob("*/*_benchmark.jsonld")):
+            if path.parent.name.lower() == software_slug.lower():
+                continue
+            ref = _try_load(path)
+            if ref and _same_name(ref.label, benchmark_label):
+                return ref, f"from the earlier {path.parent.name} run", []
+    return None, "", []
