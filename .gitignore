@@ -36,4 +36,8 @@ ENV/
 .DS_Store
 Thumbs.db
 
-.benchmantic_corrections.json.benchmantic/
+.benchmantic_corrections.json
+.benchmantic/
+.*_cache.json
+.benchmantic_outputs.json
+.semantic_links_cache.json
