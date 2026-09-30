@@ -102,7 +102,13 @@ def build_manifest_section(
     # file's own root entity now, not this one -- see this module's
     # docstring and GraphBuilder.build_dataset_graph().
     dataset_root = (dataset_by_id or {}).get("./")
-    author = dataset_by_id.get(_id(dataset_root.get("author"))) if dataset_root and dataset_by_id else None
+    # "author" is one reference, or a list of them (several authors, e.g.
+    # from an AUTHORS file or CITATION.cff).
+    author_refs = (dataset_root or {}).get("author") or []
+    if not isinstance(author_refs, list):
+        author_refs = [author_refs]
+    authors = [dataset_by_id.get(_id(ref)) for ref in author_refs] if dataset_by_id else []
+    authors = [a for a in authors if a]
     publisher = dataset_by_id.get(_id(dataset_root.get("publisher"))) if dataset_root and dataset_by_id else None
 
     out.append("## Benchmark / Manifest metadata\n")
@@ -116,9 +122,13 @@ def build_manifest_section(
         ["Software", (software or {}).get("label", "")],
         ["Code repository", (root or {}).get("codeRepository", "")],
     ]
-    if author:
+    for author in authors:
         note = f" ({author['schema:disambiguatingDescription']})" if "schema:disambiguatingDescription" in author else ""
-        rows.append(["Author", f"{author.get('name', '')} [{_short(author.get('@type'))}]{note}"])
+        affiliation = dataset_by_id.get(_id(author.get("schema:affiliation"))) if author.get("schema:affiliation") else None
+        extra = f", {affiliation['name']}" if affiliation and affiliation.get("name") else ""
+        orcid = f", {author['@id']}" if str(author.get("@id", "")).startswith("https://orcid.org/") else ""
+        label = "Author" if len(authors) == 1 else "Authors" if author is authors[0] else ""
+        rows.append([label, f"{author.get('name', '')} [{_short(author.get('@type'))}]{extra}{orcid}{note}"])
         if author.get("schema:url"):
             rows.append(["Author URL", author["schema:url"]])
     if publisher:
@@ -237,6 +247,38 @@ def build_metrics_section(by_id: dict[str, dict[str, Any]], out: list[str]) -> N
 # Entry point
 # ============================================================
 
+def build_mapping_section(metadata_jsonld: Path, out: list[str]) -> None:
+    """The input mapping (benchmark parameters -> this software's inputs)
+    from the sibling <name>_mapping.json, when there is one."""
+    from metadata.mapping import load_mapping, mapping_path_for
+
+    path = mapping_path_for(metadata_jsonld)
+    mapping = load_mapping(path) if path else None
+    if not mapping:
+        return
+    ref = mapping.get("reference") or {}
+    source = f"mapped onto the reference benchmark `{ref.get('label') or ref.get('file')}`" if ref else "1:1"
+    out.append(f"## Input mapping -- {mapping.get('software')} ({source})\n")
+    rows = []
+    for i in mapping.get("inputs", []):
+        conf = i.get("confidence")
+        rows.append([
+            f"`{i['input']}`",
+            f"`{i['expression']}`" if i.get("expression") else "(not mapped -- keeps its own value)",
+            "" if conf is None else f"{conf:.2f}",
+            i.get("explanation", ""),
+        ])
+    _print_table(rows, ["Software input", "Set from benchmark parameters", "Confidence", "Explanation"], out)
+    unused = mapping.get("unused_benchmark_parameters") or []
+    if unused:
+        out.append(f"⚠️ Benchmark parameter(s) not used by any {mapping.get('software')} input: "
+                   + ", ".join(f"`{u}`" for u in unused) + "\n")
+    for note in (mapping.get("checks") or {}).get("summary", [])[1:]:
+        if note.strip().startswith(("warning", "note")) and "not used by any" not in note:
+            out.append(f"- {_md_escape(note)}")
+    out.append("")
+
+
 def _find_sibling_dataset(metadata_jsonld: Path) -> Path | None:
     """Best-effort discovery of the sibling "<benchmark-name>_dataset.jsonld"
     file describe_benchmark.py writes next to the benchmark file (see
@@ -301,6 +343,7 @@ def run(args: argparse.Namespace) -> None:
     build_dependencies_section(by_id, out, dataset_by_id)
     build_parameters_section(by_id, out)
     build_metrics_section(by_id, out)
+    build_mapping_section(args.metadata_jsonld, out)
 
     text = "\n".join(out)
     if not args.quiet:

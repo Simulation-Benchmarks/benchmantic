@@ -23,7 +23,11 @@ from typing import Any
 
 from metadata.graph import find_all, load_graph
 from metadata.graph import node_id as _id
-from snakefile.renderer import DEFAULT_UNIT_SYMBOLS, render_parameters_json, render_snakefile
+from metadata.mapping import load_mapping, mapping_path_for
+from snakefile.renderer import (
+    DEFAULT_UNIT_SYMBOLS, render_mapped_dumux_snakefile, render_openfoam_snakefile, render_parameters_json,
+    render_snakefile,
+)
 
 def extract_case_parameters(by_id: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """{case_id: {"Section.Key": value, ...}} for every m4i:ParameterSet in
@@ -257,6 +261,31 @@ def generate(args: argparse.Namespace) -> None:
         qudt_unit, symbol = entry.split("=", 1)
         unit_symbols[qudt_unit.strip()] = symbol.strip()
 
+    mapping_file = mapping_path_for(args.metadata_jsonld)
+    mapping = load_mapping(mapping_file) if mapping_file else None
+    software = (mapping or {}).get("software") or build_hints.get("software") or software_name
+    if mapping and software.lower() == "openfoam":
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        snakefile_path = args.output_dir / "Snakefile"
+        snakefile_path.write_text(render_openfoam_snakefile(mapping, build_hints, args, units, unit_symbols),
+                                  encoding="utf-8")
+        print(f"Wrote {snakefile_path} (OpenFOAM, from {mapping_file.name})")
+        for case_id, values in cases.items():
+            case_dir = args.output_dir / case_id
+            case_dir.mkdir(parents=True, exist_ok=True)
+            params_path = case_dir / "parameters.json"
+            params_path.write_text(render_parameters_json(case_id, values, units, unit_symbols), encoding="utf-8")
+            print(f"Wrote {params_path}")
+        mapped = [i["input"] for i in mapping["inputs"] if i.get("expression")]
+        print(
+            f"\n{len(cases)} case(s), {len(mapped)} mapped input(s): {', '.join(mapped)}\n"
+            f"application = {build_hints.get('executable_name') or 'simpleFoam'}\n"
+            f"case run    = {'Allrun' if build_hints.get('has_allrun') else 'blockMesh + application'}"
+            + (f"\nmetrics     = {build_hints['metrics_script']} {build_hints.get('metrics_args', '.')}"
+               if build_hints.get("metrics_script") else "\nmetrics     = (no script found)")
+        )
+        return
+
     executable = args.executable or derive_executable(build_hints)
     if not executable:
         hints_path = args.metadata_jsonld.with_name(args.metadata_jsonld.stem + ".build_hints.json")
@@ -287,12 +316,27 @@ def generate(args: argparse.Namespace) -> None:
                 seen.add(k)
                 flag_keys.append(k)
 
-    if args.mesh_split and args.inner_radius_flag not in flag_keys:
+    use_expressions = bool(mapping) and not (args.mesh_split and mapping.get("reference") is None)
+    config_names: dict[str, str] = {}
+    if mapping and not use_expressions:
+        # 1:1 mapping (neutral names) with the flag-based renderer: flags are
+        # the software inputs, parameters.json is read by the neutral name.
+        neutral_to_flag = {}
+        for i in mapping["inputs"]:
+            params = i.get("benchmark_parameters") or []
+            if len(params) == 1:
+                neutral_to_flag[params[0]] = i["input"]
+        flag_keys = [neutral_to_flag.get(k, k) for k in flag_keys]
+        sample_case_values = {neutral_to_flag.get(k, k): v for k, v in sample_case_values.items()}
+        units = {neutral_to_flag.get(k, k): v for k, v in units.items()}
+        config_names = {flag: neutral for neutral, flag in neutral_to_flag.items()}
+
+    if args.mesh_split and not use_expressions and args.inner_radius_flag not in flag_keys:
         sys.exit(
             f"Error: --mesh-split needs --inner-radius-flag ({args.inner_radius_flag!r}) to be one of the "
             f"case-varying parameters, but it's not in: {', '.join(flag_keys)}"
         )
-    if args.mesh_split and args.outer_radius_flag and args.outer_radius_flag not in flag_keys:
+    if args.mesh_split and not use_expressions and args.outer_radius_flag and args.outer_radius_flag not in flag_keys:
         sys.exit(
             f"Error: --outer-radius-flag ({args.outer_radius_flag!r}) is not one of the case-varying "
             f"parameters: {', '.join(flag_keys)}. Use --outer-radius for a fixed value instead."
@@ -300,7 +344,7 @@ def generate(args: argparse.Namespace) -> None:
     def _is_multi_value(v: Any) -> bool:
         return (isinstance(v, str) and len(v.split()) > 1) or isinstance(v, list)
 
-    if args.mesh_split and not _is_multi_value(sample_case_values.get(args.inner_radius_flag)):
+    if args.mesh_split and not use_expressions and not _is_multi_value(sample_case_values.get(args.inner_radius_flag)):
         # Scalar radius value -- r2 has to come from somewhere else.
         if not args.outer_radius_flag and args.outer_radius is None:
             sys.exit(
@@ -313,10 +357,19 @@ def generate(args: argparse.Namespace) -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     snakefile_path = args.output_dir / "Snakefile"
-    snakefile_path.write_text(
-        render_snakefile(flag_keys, executable, build_dir, args, sample_case_values, units, unit_symbols),
-        encoding="utf-8",
-    )
+    if use_expressions:
+        # Inputs set from the mapping's expressions (reference mapping, or a
+        # 1:1 mapping without --mesh-split).
+        if args.mesh_split:
+            print("note: --mesh-split is ignored with --reference-benchmark -- the mapping's expressions "
+                  "already say how the mesh inputs are computed.")
+        text = render_mapped_dumux_snakefile(mapping, executable, build_dir, args, units, unit_symbols)
+    else:
+        # Software input names as flags; with a 1:1 mapping (neutral names),
+        # parameters.json is read by the neutral name of each input.
+        text = render_snakefile(flag_keys, executable, build_dir, args, sample_case_values, units, unit_symbols,
+                                config_names)
+    snakefile_path.write_text(text, encoding="utf-8")
     print(f"Wrote {snakefile_path}")
 
     if args.zip:

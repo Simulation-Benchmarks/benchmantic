@@ -154,6 +154,13 @@ def derive_benchmark_filename(by_id: dict) -> str:
     return f"{slug}_benchmark.jsonld"
 
 
+def mapping_filename_for(benchmark_filename: str) -> str:
+    """'rotating_cylinders_benchmark.jsonld' -> 'rotating_cylinders_mapping.json'."""
+    stem = Path(benchmark_filename).stem
+    stem = stem[: -len("_benchmark")] if stem.endswith("_benchmark") else stem
+    return f"{stem}_mapping.json"
+
+
 def derive_dataset_filename(by_id: dict) -> str:
     """"<slug>_dataset.jsonld" -- the sidecar file holding author/publisher/
     dependency info (see metadata.builder's GraphBuilder.build_dataset_graph()),
@@ -250,6 +257,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # --- metadata.builder pass-through ---
     meta = ap.add_argument_group("metadata.builder options")
     meta.add_argument("--main-cc", type=Path, default=None)
+    meta.add_argument("--software", choices=builder.SOFTWARE_CHOICES, default="auto",
+                       help="Simulation software (default: detected from the files).")
+    builder.add_mapping_args(meta)
     builder.add_semantic_override_args(meta)
     meta.add_argument("--scenario-params", type=str, default=None)
     meta.add_argument("--full-value-params", type=str, default=None)
@@ -410,6 +420,9 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         math_model_label=args.math_model_label,
         math_model_id=args.math_model_id,
         no_mardi_lookup=args.no_mardi_lookup,
+        software=args.software,
+        reference_benchmark=args.reference_benchmark,
+        parameter_names=args.parameter_names,
         scenario_params=args.scenario_params,
         full_value_params=args.full_value_params,
         provider=args.provider or builder.DEFAULT_PROVIDER,
@@ -454,6 +467,11 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         builder.build, builder_args,
     )
     stats = stats or {}
+    # The mapping check results matter even in a quiet run (e.g. a
+    # benchmark parameter this implementation ignores) -- the builder's own
+    # output is only shown live in verbose/interactive runs.
+    if stats.get("mapping_notes") and not (args.verbose or args.debug or needs_interactive):
+        print("\n".join(stats["mapping_notes"]))
 
     staged_by_id = load_graph(staged_benchmark)
     software_name = args.software_name or generator.derive_software_name(staged_by_id)
@@ -558,6 +576,17 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
     hints_path = output_dir / f"{Path(benchmark_filename).stem}.build_hints.json"
     if staged_hints.exists():
         shutil.move(str(staged_hints), str(hints_path))
+
+    # Input mapping (software-neutral benchmark parameters -> this
+    # software's inputs; see metadata.mapping) -- a deliverable next to the
+    # description, and what the Snakefile generator reads.
+    staged_mapping = staging_dir / "staged.mapping.json"
+    mapping_path: Path | None = None
+    if staged_mapping.exists():
+        mapping_path = output_dir / mapping_filename_for(benchmark_filename)
+        shutil.move(str(staged_mapping), str(mapping_path))
+        if args.verbose or args.debug:
+            print(f"-> Wrote {mapping_path}")
     shutil.rmtree(staging_dir, ignore_errors=True)
 
     # 2. Snakefile -- generated into a throwaway workdir alongside the
@@ -630,7 +659,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
-    artifact_paths = [p for p in (benchmark_path, dataset_path, snakefile_path, review_path) if p is not None]
+    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, snakefile_path, review_path)
+                      if p is not None]
     _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path
 

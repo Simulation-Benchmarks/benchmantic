@@ -508,3 +508,39 @@ def discover_cases(root: Path) -> list[tuple[Path, str]]:
     return cases
 
 
+
+
+def read_citation_cff(path: Path | None) -> dict:
+    """Authors, license and repository URL from a CITATION.cff file
+    (https://citation-file-format.github.io). Returns {} when there's no
+    file, it can't be parsed, or PyYAML isn't installed.
+
+    authors: [{"name", "orcid", "affiliation"}, ...] (people and entities)
+    """
+    if path is None or not path.exists():
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 -- optional metadata source
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    authors = []
+    for a in data.get("authors") or []:
+        if not isinstance(a, dict):
+            continue
+        name = " ".join(str(a[k]) for k in ("given-names", "name-particle", "family-names") if a.get(k)) \
+            or str(a.get("name") or "").strip()
+        if name:
+            authors.append({"name": name, "orcid": a.get("orcid"), "affiliation": a.get("affiliation")})
+    license_id = data.get("license")
+    if isinstance(license_id, list):
+        license_id = license_id[0] if license_id else None
+    return {
+        "authors": authors,
+        "license": license_id,
+        "repository_code": data.get("repository-code") or data.get("repository"),
+        "version": data.get("version"),
+        "title": data.get("title"),
+    }

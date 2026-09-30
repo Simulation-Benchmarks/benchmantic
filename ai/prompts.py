@@ -24,7 +24,13 @@ SYSTEM_PROMPT = """\
 You are an expert in Computational Fluid Dynamics, DuMux, OpenFOAM,
 scientific metadata, QUDT units, and JSON-LD.
 
-Your task is to infer semantic metadata from DUNE params.input files.
+Your task is to infer semantic metadata for the input parameters of a
+simulation code -- e.g. entries of a DUNE/DuMux params.input INI file, or of
+OpenFOAM case dictionaries. Each parameter is identified by "ini":
+[section, key]: for an INI file the [Section] and the key; for OpenFOAM the
+dictionary file (e.g. "constant/MRFProperties") and the entry path (e.g.
+"MRF1/omega"). A value of the form "{name}" is a template placeholder: the
+value is set per benchmark run, so infer from the name, hint and context.
 
 For every parameter infer:
   - semantic_name
@@ -61,17 +67,19 @@ NEVER be confused:
       quantityKind DimensionlessRatio / Count -> unit unit:UNITLESS
 
 Some parameter entries include a "cpp_hint" field and a "code_context"
-field: cpp_hint is scraped directly from the source code's
+field: cpp_hint is scraped directly from the source -- for DuMux the
 getParam<Type>("Section.Key") call site (e.g. the exact C++ variable name
-and type it is assigned to, such as `density_` of type `Scalar`);
+and type it is assigned to, such as `density_` of type `Scalar`), for
+OpenFOAM the dictionary and entry the value lives in;
 code_context is a short excerpt of the actual surrounding source code at
 that same call site. Treat these as strong, code-grounded evidence of the
-parameter's physical meaning and prefer them over guessing from the INI key
+parameter's physical meaning and prefer them over guessing from the key
 name alone -- e.g. a variable named `density_`/`rho_` implies kg/m3, a
 variable read as `omega_`/an angular velocity implies rad/s, `viscosity_`
-(dynamic) implies Pa*s, `radius_`/`length_` implies m. A parameter with
-neither field means no getParam<>() call site was found for it -- infer
-from the key name, value, and benchmark description instead.
+(dynamic) implies Pa*s, `radius_`/`length_` implies m; in OpenFOAM, `nu` is
+a kinematic viscosity (m2/s) and an MRF `omega` an angular velocity (rad/s).
+A parameter with neither field has no code hint -- infer from the key name,
+value, and benchmark description instead.
 
 You may also be shown "known corrections from prior human review": cases
 where a human reviewer corrected an earlier AI guess for a similarly named
@@ -84,15 +92,15 @@ different item just because the name is similar.
 A benchmark description (a doc-comment from the source, if available) is
 provided as background context to help you understand what physical
 scenario or published benchmark this is. Do NOT infer metadata for
-anything other than the exact parameters listed under "params.input"
+anything other than the exact parameters listed under "input parameters"
 below -- you are deliberately NOT shown the rest of the source file, only
 each parameter's own code_context, so there is nothing else to notice.
 
-STRICT OUTPUT RULE: the "params.input" section below lists exactly the
+STRICT OUTPUT RULE: the "input parameters" section below lists exactly the
 parameters you must return metadata for -- one JSON object per entry, same
 section/key pairs, nothing added and nothing omitted. Do not include
-parameters you merely noticed in main.cc, problem.hh, or the benchmark
-description; only the ones explicitly listed under "params.input" below.
+parameters you merely noticed in the source code or the benchmark
+description; only the ones explicitly listed under "input parameters" below.
 
 Respond with a raw JSON array only: the first character of your response must
 be '[' and the last character must be ']'. Do not wrap the JSON in markdown
@@ -108,7 +116,7 @@ benchmark description
 {benchmark_description}
 
 =====================
-params.input -- infer metadata for EXACTLY these {n_items} parameter(s), no others.
+input parameters -- infer metadata for EXACTLY these {n_items} parameter(s), no others.
 Each entry's own "cpp_hint"/"code_context" (see the system prompt) is your
 primary code-grounded evidence.
 =====================
@@ -123,7 +131,7 @@ independently from its own code context)
 
 {known_corrections}
 {fallback_context}
-Infer semantic metadata for every parameter listed under params.input above
+Infer semantic metadata for every parameter listed under input parameters above
 -- exactly {n_items} item(s), no more, no less.
 
 Return JSON like:
@@ -290,11 +298,12 @@ Rules for choosing units:
     (e.g. "l2_error_pressure_abs"), give it that field's own SI unit (e.g.
     pascal for pressure errors), not a unitless placeholder.
   - Use the benchmark description and each metric's own "context" field
-    (a snippet of the main.cc code around where it's computed/written) to
+    (a snippet of the code around where it's computed/written, e.g. main.cc
+    or a post-processing script) to
     judge what physical quantity the metric represents.
 
 A benchmark description is provided as background context. You are
-deliberately NOT shown the rest of main.cc/problem.hh -- only each metric's
+deliberately NOT shown the rest of the source code -- only each metric's
 own "context" snippet -- so there is nothing else to notice or infer
 metadata for.
 
@@ -313,7 +322,7 @@ preamble before or after the JSON.
 METRIC_PROMPT_TEMPLATE = """\
 The benchmark writes these solution metrics to its results/summary JSON
 file. Each entry below gives the metric's key plus a short snippet of the
-surrounding main.cc code for context.
+surrounding code (main.cc, or a post-processing script) for context.
 
 =====================
 benchmark description

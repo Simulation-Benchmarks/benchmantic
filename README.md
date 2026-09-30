@@ -1,12 +1,13 @@
 # benchmantic
 
-Generates a shareable, machine-readable semantic description (RO-Crate JSON-LD) from a simulation benchmark's source code, and packages a ready-to-run Snakemake workflow around it.
+Generates a shareable, machine-readable semantic description (RO-Crate JSON-LD) from a simulation benchmark's source code, and packages a ready-to-run Snakemake workflow around it. Supports **DuMux** and **OpenFOAM** implementations; parameters are described with software-neutral names, with a per-software mapping to each code's own inputs.
 
 ## Pipeline diagram
 
 ```
 local folder or git URL
-  (params.input, C++ source, README, build config)
+  (DuMux: params.input + C++ source; OpenFOAM: case
+   dictionaries + post-processing script; README, build config)
         │
         ▼
 describe_benchmark.py
@@ -18,6 +19,9 @@ describe_benchmark.py
         ├─▶ <name>_dataset.jsonld
         │     dataset provenance (author, publisher,
         │     software dependencies)
+        ├─▶ <name>_mapping.json
+        │     benchmark parameters -> this software's
+        │     inputs (expressions, checks)
         └─▶ Snakefile
               plain file, container-ready
 
@@ -33,7 +37,7 @@ workflow.py runs all of the above in one command
 ## Features
 
 - Works from a local checkout or a remote source alike: `<module_dir>` accepts a local folder path, or a GitHub/GitLab/any git-reachable URL, cloned into a throwaway temp directory that's deleted once the run finishes (pass `--keep-clone` to reuse a persistent local clone across runs instead).
-- Discovers input parameters and output metrics directly from source (`params.input`, `main.cc`, `problem.hh`), plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`.
+- Discovers input parameters and output metrics directly from source -- for DuMux `params.input`, `main.cc`, `problem.hh`; for OpenFOAM the case dictionaries (`system/`, `constant/`, `0/`, including template placeholders like `{omega}`) and the post-processing script that writes `solution_metrics.json` -- plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`. See [Supported software and parameter names](#supported-software-and-parameter-names).
 - Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in a compact `getParam<Type>()` call-site excerpt from the C++ source (not the raw config key name alone, and not the whole file). Three layers keep this within a provider's tokens-per-minute budget instead of relying on retries after the fact: requests are estimated and batched below both an item-count cap (`--inference-batch-size`) and a token-size target (`--inference-tpm-budget`), and every request reserves its estimated cost against one shared budget across the whole run so a burst of small requests can't collectively exceed it either.
 - Parameter selection: which discovered `params.input` entries actually go into the run. On a real terminal, a wide enough window (100+ columns) and a long enough list (more than a dozen candidates -- the motivating case is a benchmark with 30+ parameters) show a two-column checkbox screen: items numbered straight down the left column, then continuing down the right (e.g. 1-19 left, 20-38 right for 38 parameters) instead of one long list you'd otherwise have to scroll all the way through, with a live "Selected N/total" badge in the top corner and a running list of exactly what's checked, by name, at the bottom. `↑`/`↓` move within the current column and wrap there, `Tab` (or `←`/`→`) hops the highlight to the matching row in the other column, Space toggles, and typing a number jumps straight to that item wherever it lands, same as elsewhere in this tool. A shorter list or a narrower terminal uses a single scrolling column instead (the same layout the Outputs step's own small "Custom" toggle screen always uses) -- a mostly-empty second column would just look broken for a handful of items. Falls back to a plain-text "type index numbers to toggle" table when curses isn't usable at all.
 - Interactive review step: before anything is built into the graph, parameters AND metrics go through one combined review pass. On a real terminal, this is a curses screen showing only the items that actually need a look (low confidence, or a structural flag unrelated to the AI's own confidence) — everything else is auto-accepted and just counted, with Accept/Rename/Change unit/Change type/Change quantity kind/Edit explanation per item, chosen with arrow keys or a single digit press (`1`-`7`); falls back automatically to a plain-text table (same idea, `--skip-review`-friendly) when curses isn't usable (no real TTY, e.g. piped/CI output) or you back out of it with `q`.
@@ -149,6 +153,33 @@ Any flag either script accepts can go in the file (keys use the flag name with o
 
 **The generated `parameters.json` key convention, and Workflow-only mode's real limitation.** `snakefile.renderer.config_key()` writes each case's `parameters.json` key as the bare `Section.Key` (e.g. `Grid.Radial0`) UNLESS that parameter's unit is both known and one of `DEFAULT_UNIT_SYMBOLS` (currently `unit:M` → `m`, `unit:PA` → `Pa`), in which case it appends a bracketed suffix (`Grid.Radial0[m]`) to mirror `run_benchmark.py`'s own `parameter_json_key()` convention at runtime -- pass `--unit-symbol QUDT_UNIT=symbol` (repeatable) to `snakefile.generator`/`describe_benchmark.py` to extend or override that mapping if `run_benchmark.py`'s own `UNIT_SYMBOLS` differs. This is exactly where the **Workflow only** Outputs preset's one real limitation comes from: since that mode skips semantic inference entirely, no parameter's unit is ever known (every parameter reads back as `unit:UNITLESS`), so `config_key()` always falls back to the bare key -- correctly and honestly (a bare key is the right answer for "we genuinely don't know"), but if the real `run_benchmark.py` your container runs actually expects a unit-suffixed key for one of your selected parameters (i.e. its real-world unit is meters or pascals), that key won't match at runtime and the benchmark could silently read the wrong config value for that parameter. `--unit-symbol` can't work around this by itself in Workflow-only mode, since it only extends the unit→symbol mapping and there's no per-parameter unit recorded to map from -- check every selected parameter against your benchmark's actual `run_benchmark.py` before relying on Workflow-only mode for one with meter/pascal-valued parameters, or use a preset that keeps semantic inference on instead.
 
+## Supported software and parameter names
+
+The software is detected from the files (override with `--software dumux|openfoam`):
+
+| Software | Recognised by | Inputs | Metrics |
+|---|---|---|---|
+| DuMux | `main.cc` + `problem.hh` | `params.input` entries, with `getParam<T>()` call sites as context | JSON keys written in `main.cc` |
+| OpenFOAM | a case with `system/controlDict`, or a zip containing one (e.g. `output_template.zip`, unpacked to `<module>/.benchmantic/`) | dictionary entries (`constant/MRFProperties` / `MRF1/omega`), with how each is used in the file as context; template placeholders `{name}` are pre-selected | keys of the dict a Python script `json.dump`s to `solution_metrics.json` |
+
+Each simulation code is an *adapter* in `metadata/adapters/`; adding another code means implementing one class (find the module, list inputs, metrics and cases).
+
+**Parameter names.** The description names parameters software-neutrally, so descriptions of the same benchmark in different codes line up. The link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. There are two ways to get the neutral names:
+
+- **First implementation of a benchmark** (default): the reviewed semantic name of each input becomes its name (e.g. `angular_velocity_inner_cylinder`), mapped 1:1 to the input. `--parameter-names software` keeps the software's own names instead (the previous behaviour; no mapping file).
+- **Another implementation of an existing benchmark**: `--reference-benchmark benchmark/1.0.0/minimal-configurations.json`. The description takes the reference's parameters, units and configurations, so it matches the reference exactly. The LLM proposes, for each selected software input, an expression over the reference's parameters -- a Python f-string body, e.g.
+
+  | Input | Expression |
+  |---|---|
+  | DuMux `Grid.Cells0` | `{cells_radial // 2} {cells_radial // 2}` |
+  | DuMux `Grid.Radial0` | `{inner_radius} {(inner_radius + outer_radius) / 2} {outer_radius}` |
+  | OpenFOAM `geom/ntheta` | `{cells_angular // 4}` |
+  | OpenFOAM `transportModel` | *(not mapped -- keeps its own value)* |
+
+  Expressions are restricted to parameter names, numbers, arithmetic and a few functions. They are evaluated for every reference configuration, compared with the template's own values where it has them, and shown for review (Enter accepts, a row number edits). Reference parameters no input uses are reported -- e.g. the OpenFOAM rotating-cylinders case keeps the outer cylinder fixed, so `angular_velocity_outer_cylinder` is flagged as ignored. Metrics the reference defines keep its units; only new ones are inferred. The mapping is cached in `<module>/.parameter_mapping_cache.json`.
+
+The generated Snakefile reads the neutral names from `parameters.json` (as written by the catalog's `run_benchmark.py`, including unit suffixes such as `inner_radius[m]` and `angular_velocity_inner_cylinder[rad/s]`) and sets each input from its expression: DuMux gets `-Section.Key "<value>"` flags; OpenFOAM gets its placeholders filled in (`X.template` -> `X`) or entries set with `foamDictionary`, then runs `Allrun` (or `blockMesh` + the solver) and the metrics script. `--mesh-split` still works with 1:1 mappings; with a reference, the expressions replace it.
+
 ## Architecture / Pipeline walkthrough
 
 `describe_benchmark.py` is the single entry point, and runs five stages in process (calling `metadata.builder` and `snakefile.generator` directly, not via subprocess) — on screen, these map onto six numbered step banners (`1/6 Discover benchmark`, `2/6 Select parameters`, `3/6 Select outputs`, `4/6 Infer & review`, `5/6 Generate`, `6/6 Validate`), since stage 1 below covers both discovery and parameter selection. The Outputs step (`3/6`) deliberately comes BEFORE inference (`4/6`), not after it: it's the one decision that can skip semantic inference entirely (the **Workflow only** preset), so it has to be made before any LLM call, not right before generation the way it used to be.
@@ -183,6 +214,10 @@ benchmantic/
 ├── utils.py                   # shared string/number/file helpers
 ├── metadata/                  # benchmark.jsonld generation
 │   ├── builder.py             #   orchestrates manifest + RO-Crate @graph construction (benchmark + dataset docs)
+│   ├── adapters/              #   one adapter per simulation code (DuMux, OpenFOAM): inputs, metrics, cases
+│   ├── foam_dict.py           #   OpenFOAM dictionary reader
+│   ├── mapping.py             #   benchmark parameters -> software inputs: expressions, checks, mapping file
+│   ├── reference.py           #   reads an existing benchmark description (--reference-benchmark)
 │   ├── graph.py               #   shared @id-resolution / node-lookup helpers
 │   ├── repo_source.py         #   resolves module_dir: local path, or clone/update a git URL
 │   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CMake discovery
@@ -193,6 +228,7 @@ benchmantic/
 │   └── software.py            #   simulation-software detection (DuMux, OpenFOAM, ...)
 ├── ai/                        # LLM-based semantic metadata inference
 │   ├── prompts.py              #   prompt templates for parameters and metrics
+│   ├── mapping.py              #   LLM proposal of input -> benchmark-parameter expressions
 │   ├── inference.py            #   provider config + request/retry loop
 │   ├── validation.py           #   response validation and repair
 │   ├── review.py                #   combined review/edit step (plain-text) with confidence gating

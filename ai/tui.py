@@ -1070,6 +1070,175 @@ def _review_one_item(
 
 
 # =============================================================================
+# Mapping review (--reference-benchmark): same look and controls as the
+# semantic review above -- summary screen, then one panel per input.
+# =============================================================================
+
+_MAPPING_ACTIONS = ["Accept", "Edit expression", "Set to not mapped", "Skip"]
+#: Why the last mapping_review_queue() call fell back, if it raised.
+LAST_ERROR: str | None = None
+
+
+def mapping_review_queue(items: list[dict], threshold: float, example_label: str,
+                         render_example, check_expression) -> bool | None:
+    """Review of the input mapping. `items` are dicts with display,
+    expression (None = not mapped), template_value, confidence and
+    explanation, edited in place. `render_example(expr)` returns the value
+    for the example configuration; `check_expression(expr)` returns None or
+    the problem. Items below `threshold` (or whose expression doesn't
+    evaluate) are flagged. Returns True when done, None if curses isn't
+    usable or the reviewer quit to plain text."""
+    if curses is None or not items:
+        return None
+    try:
+        return bool(curses.wrapper(_mapping_queue_impl, items, threshold, example_label,
+                                   render_example, check_expression))
+    except _Cancelled:
+        return None
+    except Exception as exc:  # noqa: BLE001 -- the caller falls back to plain text and says why
+        global LAST_ERROR
+        LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
+
+
+def _mapping_value(item: dict) -> str:
+    return item["expression"] if item.get("expression") else "(not mapped -- keeps its own value)"
+
+
+def _mapping_example(item: dict, render_example) -> str:
+    if not item.get("expression"):
+        return "-"
+    try:
+        return str(render_example(item["expression"]))
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+
+
+def _mapping_flagged(item: dict, threshold: float, check_expression) -> bool:
+    if item.get("expression") and check_expression(item["expression"]):
+        return True
+    return (item.get("confidence") or 0.0) < threshold
+
+
+def _mapping_queue_impl(stdscr, items, threshold, example_label, render_example, check_expression) -> bool:
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    flagged = [it for it in items if _mapping_flagged(it, threshold, check_expression)]
+    accepted = [it for it in items if it not in flagged]
+
+    stdscr.erase()
+    _safe_addstr(stdscr, 0, 0, "Mapping review", curses.A_BOLD)
+    _safe_addstr(stdscr, 1, 0, "How each software input is set from the benchmark parameters")
+    _safe_addstr(stdscr, 3, 0, f"✓ {len(accepted)} accepted automatically")
+    _safe_addstr(stdscr, 4, 0, f"! {len(flagged)} require your review")
+    y = 6
+    for i, it in enumerate(flagged, start=1):
+        _safe_addstr(stdscr, y, 2, f"{i}. {it['display']}  <-  {_mapping_value(it)}")
+        y += 1
+    y += 1
+    if flagged:
+        _safe_addstr(stdscr, y, 0, f"  [F] Review the {len(flagged)} flagged item(s)  (or press Enter)")
+        y += 1
+    if accepted:
+        _safe_addstr(stdscr, y, 0, f"  [A] {'Also review' if flagged else 'Review'} the {len(accepted)} "
+                                   "auto-accepted item(s)")
+        y += 1
+    _safe_addstr(stdscr, y, 0, "  [N] Accept everything as-is, no review")
+    _safe_addstr(stdscr, y + 1, 0, "  [Q] Quit to plain text")
+    stdscr.refresh()
+
+    while True:
+        key = stdscr.getch()
+        lower = chr(key).lower() if 0 <= key < 256 else ""
+        if lower == "q" or key == 27:
+            raise _Cancelled()
+        if lower == "n":
+            return True
+        if lower == "a" and accepted:
+            queue = [(it, True) for it in flagged] + [(it, False) for it in accepted]
+            break
+        if lower == "f" or key in ENTER_KEYS:
+            if not flagged:
+                return True
+            queue = [(it, True) for it in flagged]
+            break
+
+    for index, (item, was_flagged) in enumerate(queue):
+        _review_one_mapping(stdscr, item, index, len(queue), was_flagged, example_label,
+                            render_example, check_expression)
+    return True
+
+
+def _review_one_mapping(stdscr, item, index, total, was_flagged, example_label,
+                        render_example, check_expression) -> None:
+    action_cursor = 0
+    message = ""
+    while True:
+        def draw_panel() -> int:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            box_w = min(max_x - 2, 72)
+            title = f"Mapping review {index + 1}/{total}"
+            if not was_flagged:
+                title += "  (auto-accepted -- reviewing by request)"
+            _safe_addstr(stdscr, 0, 0, title, curses.A_BOLD)
+            _safe_addstr(stdscr, 1, 0, "─" * min(box_w, max_x - 1))
+            _safe_addstr(stdscr, 3, 2, item["display"], curses.A_BOLD)
+            rows = [
+                ("Set from", _mapping_value(item)),
+                ("Example", f"{_mapping_example(item, render_example)}   (configuration {example_label})"),
+                ("Template", item.get("template_value") or "-"),
+                ("Confidence", f"{(item.get('confidence') or 0.0) * 100:.0f}%"),
+            ]
+            y = 5
+            for label, value in rows:
+                _safe_addstr(stdscr, y, 4, f"{label:<10} {value}"[: max_x - 5])
+                y += 1
+            y += 1
+            _safe_addstr(stdscr, y, 4, "Explanation", curses.A_UNDERLINE)
+            y += 1
+            explanation = (item.get("explanation") or "").strip()
+            for i in range(0, max(1, len(explanation)), box_w - 4):
+                if y >= max_y - len(_MAPPING_ACTIONS) - 4:
+                    break
+                _safe_addstr(stdscr, y, 4, explanation[i:i + box_w - 4])
+                y += 1
+            if message:
+                _safe_addstr(stdscr, y + 1, 4, message[: max_x - 5])
+                y += 1
+            return y
+
+        y = draw_panel()
+        stdscr.refresh()
+        menu_y = y + 2
+        choice = _select_menu(stdscr, menu_y, "? Action", _MAPPING_ACTIONS, start=action_cursor, header=draw_panel)
+        if choice is None:
+            return
+        action_cursor = choice
+        action = _MAPPING_ACTIONS[choice]
+        if action in ("Accept", "Skip"):
+            return
+        if action == "Set to not mapped":
+            item.update(expression=None, confidence=1.0, explanation="set to not mapped by the reviewer")
+            message, action_cursor = "✓ set to not mapped", 0
+            continue
+        max_y, _ = stdscr.getmaxyx()
+        typed = _text_input(
+            stdscr, min(menu_y + len(_MAPPING_ACTIONS) + 2, max_y - 1),
+            "Expression, e.g. {cells_radial // 2} (Enter save, Esc cancel):",
+            initial=item.get("expression") or "",
+        )
+        if typed is None or typed == (item.get("expression") or ""):
+            continue
+        problem = check_expression(typed)
+        if problem:
+            message = f"✗ not accepted: {problem}"
+            continue
+        item.update(expression=typed, confidence=1.0, explanation="set by the reviewer")
+        message, action_cursor = f"✓ expression -> {typed}", 0
+
+
+# =============================================================================
 # Outputs step
 # =============================================================================
 

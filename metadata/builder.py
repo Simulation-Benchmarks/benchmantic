@@ -51,12 +51,20 @@ from metadata.parameters import (
     default_scenario_candidates, discover_parameters, resolve_case_params,
 )
 from metadata import mardi
+from metadata.adapters import SOFTWARE_CHOICES, get_adapter
+from metadata.mapping import (
+    InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
+    input_display, neutral_name, render, template_consistency,
+)
+from metadata.reference import load_reference
+from ai.mapping import infer_parameter_mapping
 from metadata.publication import extract_publication_citation, extract_publication_doi
 from metadata.repository import (
     discover_cases, extract_authors_file_hint, extract_authors_list,
     extract_benchmark_description, extract_class_label, extract_publisher_from_repo_url,
     extract_readme_dependencies, extract_readme_description, extract_readme_license,
-    extract_readme_repo_url, extract_spdx_info, find_authors_file, find_executable_name,
+    extract_readme_repo_url, extract_spdx_info, find_authors_file, find_executable_name, find_repo_file,
+    read_citation_cff,
     find_module_dir, find_readme,
 )
 from metadata.software import detect_software_label
@@ -184,6 +192,9 @@ def build_manifest(
     readme_text: str = "",
     authors_text: str = "",
     authors_file_name: str | None = None,
+    label: str | None = None,
+    software_label: str | None = None,
+    citation_cff: dict | None = None,
 ) -> dict[str, Any]:
     """Derive the RO-Crate manifest (crate label, license, software, etc.)
     from problem.hh/main.cc instead of a hardcoded DEFAULT_MANIFEST or an
@@ -203,11 +214,12 @@ def build_manifest(
     extract_authors_list().
     """
     spdx = extract_spdx_info(problem_hh_text, main_cc_text)
-    class_label = extract_class_label(problem_hh_text, main_cc_text)
+    class_label = label or extract_class_label(problem_hh_text, main_cc_text)
     citation = extract_publication_citation(benchmark_description)
     publication_doi = extract_publication_doi(benchmark_description)
     readme_license_id = extract_readme_license(readme_text)
-    repo_url = extract_readme_repo_url(readme_text)
+    cff = citation_cff or {}
+    repo_url = extract_readme_repo_url(readme_text) or cff.get("repository_code")
 
     # Organization signal from the repo's hosting domain -- computed
     # unconditionally (not just as a fallback) because even when SPDX gives
@@ -237,6 +249,8 @@ def build_manifest(
     file_authors, authors_total = extract_authors_list(authors_text)
     if file_authors:
         authors, authors_source = file_authors, "authors_file"
+    elif cff.get("authors"):
+        authors, authors_source = [a["name"] for a in cff["authors"]], "citation_cff"
     elif copyright_holder:
         authors, authors_source = [copyright_holder], "spdx"
     elif org_guess:
@@ -261,7 +275,7 @@ def build_manifest(
         # --math-model-label / --math-model-id (see apply_semantic_overrides()).
         "model_qid": None,
         "model_label": f"{class_label or MANIFEST_FALLBACKS['label']} model",
-        "software_label": detect_software_label(problem_hh_text, main_cc_text) or MANIFEST_FALLBACKS["software_label"],
+        "software_label": software_label or detect_software_label(problem_hh_text, main_cc_text) or MANIFEST_FALLBACKS["software_label"],
         "publication_label": citation or MANIFEST_FALLBACKS["publication_label"],
         # Used as the publication node's @id when present (as in the
         # reference descriptions), otherwise it stays local:publication.
@@ -269,7 +283,8 @@ def build_manifest(
         "root_description": benchmark_description or None,
         "date_published": None,
         "authors": authors,
-        "authors_source": authors_source,  # "authors_file" | "spdx" | "repo_guess" | None
+        "authors_source": authors_source,  # "authors_file" | "citation_cff" | "spdx" | "repo_guess" | None
+        "author_details": {a["name"]: a for a in cff.get("authors", [])},
         "authors_omitted": max(0, authors_total - len(file_authors)),
         "authors_file_name": authors_file_name,
         "author_type": "schema:Person" if (copyright_holder and not looks_like_org) else "schema:Organization",
@@ -299,6 +314,9 @@ def build_manifest(
     elif readme_license_id:
         manifest["license_url"] = f"https://spdx.org/licenses/{readme_license_id}.html"
         manifest["license_label"] = readme_license_id
+    elif cff.get("license"):
+        manifest["license_url"] = f"https://spdx.org/licenses/{cff['license']}.html"
+        manifest["license_label"] = cff["license"]
     else:
         manifest["license_url"] = MANIFEST_FALLBACKS["license_url"]
         manifest["license_label"] = MANIFEST_FALLBACKS["license_label"]
@@ -365,7 +383,15 @@ def lookup_semantic_links(
         cache_file.unlink()
     if cache_file.exists():
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
-        return None if cached.get("declined") else cached
+        if cached.get("declined"):
+            print(f"MaRDI: keeping local ids (chosen earlier; saved in {SEMANTIC_LINKS_CACHE}, "
+                  "--clear-cache asks again)")
+            return None
+        model = cached.get("model")
+        print(f"MaRDI: research problem = {cached['problem']['label']!r} ({cached['problem']['url']})"
+              + (f", mathematical model = {model['label']!r} ({model['url']})" if model else "")
+              + f" -- from {SEMANTIC_LINKS_CACHE}")
+        return cached
 
     terms = mardi.search_terms(manifest.get("label"), benchmark_description)
     try:
@@ -484,21 +510,21 @@ class GraphBuilder:
         self.benchmark_id = f"local:bm-{slugify(manifest.get('label', 'benchmark'))}"
         self.graph: list[dict[str, Any]] = []
         self._param_value_nodes: dict[tuple[str, Any], str] = {}
-        self._extract_nodes: set[str] = set()
         self._metric_fields_built = False
+        self._extract_nodes: set[str] = set()
 
-    def _ensure_extract_node(self, key: str) -> str:
+    def _extract(self, key: str) -> dict[str, str]:
+        """Reference to the cr:extract node of a data source, created once
+        per key. A separate, typed entity because RO-Crate requires a
+        flattened graph with an @type on every entity; typed cr:Extract
+        (Croissant's class for it) rather than cr:DataSource, which the
+        SHACL DataSource shape would then require to have its own
+        cr:extract + cr:fileObject."""
         extract_id = f"local:extract_{key}"
         if extract_id not in self._extract_nodes:
-            # Deliberately untyped: this is the object of cr:extract, not a
-            # data source itself. Typing it cr:DataSource made the SHACL
-            # DataSource shape demand its own cr:extract + cr:fileObject.
-            self.graph.append({
-                "@id": extract_id,
-                "jsonPath": f"/{key}",
-            })
+            self.graph.append({"@id": extract_id, "@type": "cr:Extract", "jsonPath": f"/{key}"})
             self._extract_nodes.add(extract_id)
-        return extract_id
+        return {"@id": extract_id}
 
     def add_parameter_variable(self, semantic_name: str, value: Any, spec: dict[str, Any]) -> str:
         # @id/label are tied to the actual params.input identity (section +
@@ -506,9 +532,17 @@ class GraphBuilder:
         # stable and traceable back to the source file regardless of what
         # the model chose to call the parameter. semantic_name and the
         # LLM's explanation become a human-readable description instead.
-        section, ini_key = spec["ini"]
-        raw_label = f"{section}.{ini_key}"
-        json_key = spec.get("json_key", ini_key)
+        # A software-neutral name ("inner_radius") when set, otherwise the
+        # software's own input name ("Grid.Radial0") -- see
+        # --parameter-names and metadata.mapping.
+        neutral = spec.get("label")
+        if neutral:
+            raw_label = neutral
+            json_key = spec.get("json_key", neutral)
+        else:
+            section, ini_key = spec["ini"]
+            raw_label = f"{section}.{ini_key}"
+            json_key = spec.get("json_key", ini_key)
         # Lists aren't hashable, so use a tuple for the dedup key and a
         # joined string for the id slug when this is a full_value parameter
         # (see resolve_case_params()/--full-value-params).
@@ -518,11 +552,13 @@ class GraphBuilder:
             return self._param_value_nodes[dedup_key]
 
         slug_value = "_".join(str(v) for v in value) if isinstance(value, list) else value
-        suffix = f"{slugify(section)}_{slugify(ini_key)}_{slugify(slug_value)}"
+        if neutral:
+            suffix = f"{slugify(neutral)}_{slugify(slug_value)}"
+        else:
+            suffix = f"{slugify(section)}_{slugify(ini_key)}_{slugify(slug_value)}"
         var_id = f"local:variable_{suffix}"
         field_id = f"local:field_{suffix}"
         source_id = f"local:source_{suffix}"
-        extract_id = self._ensure_extract_node(json_key)
 
         description = clean_description(spec.get("description"))
 
@@ -543,7 +579,7 @@ class GraphBuilder:
             "dcterms:description": description,
             "has unit": {"@id": spec["unit"]},
         }
-        if semantic_name and semantic_name != raw_label:
+        if semantic_name and semantic_name != raw_label and not neutral:
             var_node["schema:alternateName"] = semantic_name
         if isinstance(value, list):
             # A full_value (multi-token) parameter -- stored as a single
@@ -555,7 +591,7 @@ class GraphBuilder:
             # individual numbers back can .split() this string.
             var_node["@type"] = "text parameter"
             var_node["has string value"] = " ".join(str(v) for v in value)
-        elif spec.get("datatype") == "schema:String":
+        elif spec.get("datatype") == "schema:String" or isinstance(value, str):
             var_node["@type"] = "text parameter"
             var_node["has string value"] = value
         else:
@@ -574,7 +610,7 @@ class GraphBuilder:
             },
             {
                 "@id": source_id, "@type": "cr:DataSource",
-                "extract": {"@id": extract_id},
+                "extract": self._extract(json_key),
                 "file object": {"@id": "local:parameter_file_object"},
             },
         ]
@@ -603,7 +639,6 @@ class GraphBuilder:
             metric_id = f"local:metric_{slug}"
             field_id = f"local:field_{slug}"
             source_id = f"local:source_{slug}"
-            extract_id = self._ensure_extract_node(key)
             self.graph += [
                 {
                     "@id": metric_id, "@type": "numerical variable", "label": key,
@@ -622,7 +657,7 @@ class GraphBuilder:
                 },
                 {
                     "@id": source_id, "@type": "cr:DataSource",
-                    "extract": {"@id": extract_id},
+                    "extract": self._extract(key),
                     "file object": {"@id": "local:summary_file_object"},
                 },
             ]
@@ -827,18 +862,25 @@ class GraphBuilder:
         authors = m.get("authors") or []
         if authors:
             source = m.get("authors_source")
-            node_type = "schema:Person" if source == "authors_file" else m.get("author_type", "schema:Organization")
+            node_type = ("schema:Person" if source in ("authors_file", "citation_cff")
+                         else m.get("author_type", "schema:Organization"))
             author_refs = []
+            affiliations: dict[str, str] = {}
             for name in authors:
-                author_id = f"local:author_{slugify(name)}"
+                details = (m.get("author_details") or {}).get(name, {})
+                author_id = details.get("orcid") or f"local:author_{slugify(name)}"
                 author_node = {"@id": author_id, "@type": node_type, "name": name}
-                if source != "authors_file" and m.get("author_url"):
+                if details.get("affiliation"):
+                    org = details["affiliation"]
+                    org_id = affiliations.setdefault(org, f"local:org_{slugify(org)}")
+                    author_node["schema:affiliation"] = {"@id": org_id}
+                if source not in ("authors_file", "citation_cff") and m.get("author_url"):
                     author_node["schema:url"] = m["author_url"]
                 # Named individuals (from an AUTHORS/CONTRIBUTORS file) are
                 # presumed affiliated with the crate's publisher org, when
                 # we have one -- that's the best signal available; there's
                 # no per-person institution info in a plain AUTHORS file.
-                if node_type == "schema:Person" and publisher_id:
+                if node_type == "schema:Person" and publisher_id and "schema:affiliation" not in author_node:
                     author_node["schema:affiliation"] = {"@id": publisher_id}
                 if source == "repo_guess":
                     author_node["schema:disambiguatingDescription"] = (
@@ -862,6 +904,8 @@ class GraphBuilder:
                 })
                 author_refs.append({"@id": more_id})
 
+            for org, org_id in affiliations.items():
+                graph.append({"@id": org_id, "@type": "schema:Organization", "name": org})
             root_entity["author"] = author_refs if len(author_refs) > 1 else author_refs[0]
 
         if m.get("dependencies"):
@@ -1276,6 +1320,21 @@ def add_semantic_override_args(ap) -> None:
                          "interactive runs); the choice is cached in <module>/" + ".semantic_links_cache.json.")
 
 
+def add_mapping_args(ap) -> None:
+    """--reference-benchmark / --parameter-names, shared with describe_benchmark.py."""
+    ap.add_argument("--reference-benchmark", type=Path, default=None, metavar="JSONLD",
+                    help="An existing description of the same benchmark (e.g. the catalog's "
+                         "benchmark/<version>/minimal-configurations.json). Its software-neutral "
+                         "parameters and configurations are used, and this software's inputs are "
+                         "mapped onto them (LLM-proposed, checked and reviewed; see "
+                         "<name>_mapping.json).")
+    ap.add_argument("--parameter-names", choices=["neutral", "software"], default="neutral",
+                    help="Without --reference-benchmark: name parameters in the description by their "
+                         "reviewed semantic name ('neutral', default, e.g. inner_radius) with a 1:1 "
+                         "mapping file to the software inputs, or by the software's own input names "
+                         "('software', e.g. Grid.Radial0; the previous behaviour).")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("module_dir", type=str,
@@ -1307,6 +1366,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "location, delete it and clone from scratch instead of fetching/checking it out "
                           "in place. Has no effect on the default throwaway clone (already always fresh). "
                           "Ignored for a local module_dir.")
+    ap.add_argument("--software", choices=SOFTWARE_CHOICES, default="auto",
+                     help="Simulation software of the benchmark implementation. Default: detected "
+                          "from the files (DuMux: main.cc + problem.hh; OpenFOAM: a case with "
+                          "system/controlDict).")
+    add_mapping_args(ap)
     ap.add_argument("--main-cc", type=Path, default=None, dest="main_cc",
                      help="Explicit path to main.cc, only needed if more than one main.cc+problem.hh "
                           "pair is found under module_dir.")
@@ -1434,6 +1498,11 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     if not args.module_dir.is_dir():
         sys.exit(f"Error: {args.module_dir} is not a directory")
 
+    ref_path = getattr(args, "reference_benchmark", None)
+    if ref_path is not None and not Path(ref_path).is_file():
+        sys.exit(f"Error: --reference-benchmark {ref_path} does not exist "
+                 f"(relative paths are resolved from {Path.cwd()}).")
+
     _print_step_header(1, "Discover benchmark")
 
     # 1. Path Resolution -- module_dir may be the exact benchmark folder or a
@@ -1445,23 +1514,30 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     # accidentally pull in cases/params from unrelated benchmarks elsewhere
     # in the same repo.
     repo_root = args.module_dir
-    module_dir = find_module_dir(repo_root, args.main_cc)
-    if args.verbose and module_dir != repo_root:
-        print(f"Resolved benchmark module: {module_dir}")
+    adapter = get_adapter(repo_root, getattr(args, "software", "auto"))
+    module_dir = adapter.find_module_dir(repo_root, args)
+    if args.verbose:
+        print(f"Software: {adapter.name}")
+        if module_dir != repo_root:
+            print(f"Resolved benchmark module: {module_dir}")
+    texts = adapter.source_texts(module_dir)
+    # README/AUTHORS/docs may sit above the folder given (e.g. the repo root
+    # above rotating-cylinders/openfoam): look up to the git repository root.
+    docs_root = _repository_root(repo_root)
 
-    main_cc_path = module_dir / "main.cc"
-    problem_hh_path = module_dir / "problem.hh"
-
-    readme_path = find_readme(module_dir, repo_root)
+    readme_path = find_readme(module_dir, docs_root)
     if args.verbose and readme_path:
         print(f"Found README: {readme_path}")
 
-    authors_hint = extract_authors_file_hint(read_text(problem_hh_path), read_text(main_cc_path))
-    authors_path = find_authors_file(module_dir, repo_root, hint=authors_hint)
+    authors_hint = extract_authors_file_hint(*texts.values())
+    authors_path = find_authors_file(module_dir, docs_root, hint=authors_hint)
+    citation_cff = read_citation_cff(find_repo_file(("CITATION.cff",), module_dir, docs_root))
+    if args.verbose and citation_cff:
+        print(f"Found CITATION.cff ({len(citation_cff.get('authors', []))} author(s))")
     if args.verbose and authors_path:
         print(f"Found authors file: {authors_path}")
 
-    executable_name, cmakelists_path = find_executable_name(module_dir, repo_root)
+    executable_name, cmakelists_path = adapter.executable_name(module_dir, repo_root)
     if args.verbose and executable_name:
         print(f"Found executable target: {executable_name} (from {cmakelists_path})")
     if not executable_name:
@@ -1469,9 +1545,8 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         # reviewer may need to act on (pass --executable explicitly later),
         # not just diagnostic noise.
         print(
-            "warning: could not find a CMakeLists.txt anywhere under the repo declaring an "
-            "executable/test target for main.cc -- generate_snakefile.py will need --executable "
-            "passed explicitly.",
+            f"warning: could not determine the {adapter.name} executable for this benchmark "
+            "-- generate_snakefile.py will need --executable passed explicitly.",
             file=sys.stderr,
         )
     # module_dir's path relative to the repo root -- e.g.
@@ -1487,19 +1562,12 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
                 if args.verbose:
                     print(f"Cleared cache: {p}")
 
-    params_input_path = module_dir / "params.input"
-
-    if not params_input_path.exists():
-        discovered = sorted(module_dir.rglob("params.input"))
-        if discovered:
-            params_input_path = discovered[0]
-        else:
-            sys.exit(f"Error: Could not find a template params.input under {module_dir}")
-
-    # 2. Discover Raw Parameters from INI file first (Before LLM)
-    raw_candidates = discover_parameters(params_input_path)
+    # 2. Discover raw parameters (before any LLM call), with code hints
+    #    attached by the adapter where available (e.g. DuMuX getParam<>()
+    #    call sites, or the OpenFOAM dictionary an entry lives in).
+    raw_candidates = adapter.discover_parameters(module_dir)
     if not raw_candidates:
-        sys.exit("Error: No raw parameters found in the template params.input file.")
+        sys.exit(f"Error: No raw parameters found in the template {adapter.input_label}.")
 
     if not args.verbose:
         # Normal mode: one short checklist instead of the individual
@@ -1508,23 +1576,20 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         print("Discovering benchmark...\n")
         print("  ✓ Source code")
         print(f"  {'✓' if readme_path else '○'} README" + ("" if readme_path else " (not found)"))
-        print(f"  {'✓' if executable_name else '○'} CMake target" + ("" if executable_name else " (not found)"))
-        print(f"  ✓ Parameters ({len(raw_candidates)} found in params.input)")
+        print(f"  {'✓' if executable_name else '○'} Executable" + ("" if executable_name else " (not found)"))
+        print(f"  ✓ Parameters ({len(raw_candidates)} found in {adapter.input_label})")
 
     # 2b. Enrich candidates with getParam<Type>("Section.Key") call-site hints
     #     scraped from main.cc/problem.hh -- e.g. "Component.LiquidDensity" ->
     #     assigned to `density_` (C++ type `Scalar`). This gives the LLM
     #     code-grounded evidence for picking the right SI unit, rather than
     #     just guessing from the INI key name.
-    attach_cpp_hints(raw_candidates, read_text(main_cc_path), read_text(problem_hh_path))
-
     # Doc-comment (e.g. Doxygen \brief + literature citation) scraped from
     # problem.hh/main.cc -- passed to the LLM as high-level scenario context
     # for both parameter and metric inference, and recorded on the
     # benchmark graph node itself.
-    benchmark_description = extract_benchmark_description(
-        read_text(problem_hh_path), read_text(main_cc_path)
-    )
+    adapter.docs_root = docs_root
+    benchmark_description = adapter.benchmark_description(module_dir, texts)
     if not benchmark_description and readme_path:
         benchmark_description = extract_readme_description(read_text(readme_path))
 
@@ -1532,7 +1597,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
 
     # 3. Filter raw candidates to determine which are Scenario-Specific
     selected_candidates = []
-    raw_map = {c.key.lower(): c for c in raw_candidates}
+    raw_map = _scenario_param_lookup(raw_candidates)
 
     if args.scenario_params:
         provided_keys = [k.strip().lower() for k in args.scenario_params.split(",") if k.strip()]
@@ -1540,7 +1605,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
             if pk in raw_map:
                 selected_candidates.append(raw_map[pk])
             else:
-                print(f"Warning: Param '{pk}' provided in --scenario-params was not found in params.input. Skipping.", file=sys.stderr)
+                print(f"Warning: Param '{pk}' provided in --scenario-params was not found in {adapter.input_label}. Skipping.", file=sys.stderr)
         if not selected_candidates:
             # --scenario-params was explicitly given, so we never fall back
             # to the interactive prompt (that would silently ignore the
@@ -1548,7 +1613,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
             # Fail loudly instead.
             sys.exit(
                 "Error: None of the parameters specified in --scenario-params "
-                f"('{args.scenario_params}') were found in params.input. "
+                f"('{args.scenario_params}') were found in {adapter.input_label}. "
                 f"Available keys: {', '.join(sorted(c.key for c in raw_candidates))}"
             )
 
@@ -1556,11 +1621,11 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     # at all; if it was given, `selected_candidates` is already final
     # (non-empty, or we've already exited above).
     if not args.scenario_params and not selected_candidates:
-        default_candidates = default_scenario_candidates(raw_candidates)
+        default_candidates = adapter.default_scenario_candidates(raw_candidates)
         default_indices = {
             i for i, c in enumerate(raw_candidates) if c in default_candidates
         }
-        sections_label = ", ".join(sorted(DEFAULT_SCENARIO_SECTIONS))
+        selection_label = adapter.default_selection_label
         checked_indices = set(default_indices)
 
         # Try a curses arrow-key checkbox screen first (see ai.tui) -- only
@@ -1578,8 +1643,8 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
             curses_result = tui.checkbox_list(
                 "Parameter selection",
                 f"{len(raw_candidates)} parameters detected -- {len(checked_indices)} selected "
-                f"automatically (under [{sections_label}]).",
-                [c.key for c in raw_candidates],
+                f"automatically ({selection_label}).",
+                [_candidate_display(c, raw_candidates) for c in raw_candidates],
                 checked_indices,
             )
             if curses_result is not None:
@@ -1594,18 +1659,18 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         # column whenever 2 wouldn't fit, and would use more than 2 on a
         # very wide terminal if that ever became worth doing (capped at 2
         # for now to keep rows scannable either way).
-        longest_formatted_len = max(len(f"[x] {i:2d} {c.key}") for i, c in enumerate(raw_candidates))
+        longest_formatted_len = max(len(f"[x] {i:2d} {_candidate_display(c, raw_candidates)}") for i, c in enumerate(raw_candidates))
         col_width = longest_formatted_len + 4  # padding margin
         term_width = shutil.get_terminal_size(fallback=(100, 24)).columns
         cols = max(1, min(2, term_width // col_width))
 
         def _print_table() -> None:
             print("\n=== Parameter Selection ===")
-            print(f"Parameters under [{sections_label}] are pre-selected by default (marked [x]).\n")
+            print(f"{selection_label[:1].upper() + selection_label[1:]} are pre-selected by default (marked [x]).\n")
             for r_idx in range(0, len(raw_candidates), cols):
                 chunk = raw_candidates[r_idx:r_idx + cols]
                 row_str = "".join(
-                    f"[{'x' if (r_idx + idx) in checked_indices else ' '}] {r_idx + idx:2d} {cand.key}".ljust(col_width)
+                    f"[{'x' if (r_idx + idx) in checked_indices else ' '}] {r_idx + idx:2d} {_candidate_display(cand, raw_candidates)}".ljust(col_width)
                     for idx, cand in enumerate(chunk)
                 )
                 print("  " + row_str)
@@ -1676,7 +1741,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
 
             except (EOFError, KeyboardInterrupt):
                 print(
-                    f"\nInput cancelled. Falling back to the default: parameters under [{sections_label}].",
+                    f"\nInput cancelled. Falling back to the default: {selection_label}.",
                     file=sys.stderr,
                 )
                 selected_candidates = default_candidates
@@ -1684,8 +1749,8 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.verbose:
         print(f"\nFinal Selection Confirmed.")
-        print(f"Scenario-Specific: {', '.join(c.key for c in selected_candidates)}")
-        print(f"Tool-specific:   {', '.join(c.key for c in raw_candidates if c not in selected_candidates) or 'None'}\n")
+        print(f"Scenario-Specific: {', '.join(_candidate_display(c, raw_candidates) for c in selected_candidates)}")
+        print(f"Tool-specific:   {', '.join(_candidate_display(c, raw_candidates) for c in raw_candidates if c not in selected_candidates) or 'None'}\n")
     else:
         print(f"\n✓ {len(selected_candidates)}/{len(raw_candidates)} parameters selected")
 
@@ -1697,6 +1762,14 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     outputs_selection = _resolve_outputs_selection(args, module_dir)
     print(f"-> {_describe_outputs_selection(outputs_selection)}")
     skip_inference = not outputs_selection.get("description", True)
+
+    reference = None
+    if getattr(args, "reference_benchmark", None):
+        if skip_inference:
+            sys.exit("Error: --reference-benchmark needs the benchmark description output "
+                     "(it can't be combined with the Snakefile-only preset).")
+        reference = load_reference(args.reference_benchmark)
+        print(f"Reference benchmark: {reference.label or args.reference_benchmark} ({reference.summary()})")
 
     _print_step_header(4, "Infer & review")
     if skip_inference:
@@ -1730,13 +1803,34 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         ]
         final_metric_metadata = []
         metric_keys = []
+    elif reference is not None:
+        # Parameters come from the reference; this software's selected
+        # inputs are mapped onto them. Metrics the reference defines keep
+        # its units; only new ones are inferred.
+        mapped_inputs = _map_to_reference(args, module_dir, adapter, selected_candidates, reference,
+                                          benchmark_description)
+        known_metrics = {
+            name: {"key": name, "semantic_name": name, "datatype": "schema:Double", "unit": info["unit"],
+                   "quantityKind": info.get("quantityKind"), "confidence": 1.0,
+                   "explanation": info.get("description") or "Taken from the reference benchmark."}
+            for name, info in reference.metrics.items()
+        }
+        final_metadata = []
+        _, final_metric_metadata, metric_keys = _infer_and_review(
+            args, module_dir, repo_root, adapter, texts, [], raw_candidates,
+            benchmark_description, known_metrics=known_metrics,
+        )
+        missing_metrics = sorted(set(reference.metrics) - set(metric_keys))
+        if missing_metrics:
+            print(f"warning: the reference benchmark's metric(s) {', '.join(missing_metrics)} are not "
+                  f"written by this {adapter.name} implementation.", file=sys.stderr)
     else:
         final_metadata, final_metric_metadata, metric_keys = _infer_and_review(
-            args, module_dir, selected_candidates, raw_candidates, main_cc_path, problem_hh_path,
+            args, module_dir, repo_root, adapter, texts, selected_candidates, raw_candidates,
             benchmark_description,
         )
 
-    if args.full_value_params:
+    if args.full_value_params and reference is None:
         full_value_keys = {k.strip().lower() for k in args.full_value_params.split(",") if k.strip()}
         matched = 0
         for item in final_metadata:
@@ -1752,34 +1846,54 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
             )
         print(f"Capturing full multi-token value for {matched} parameter(s): {args.full_value_params}")
 
-    filtered_parameter_fields = build_parameter_fields(final_metadata)
+    if reference is not None:
+        filtered_parameter_fields = {
+            name: {"label": name, "semantic_name": name, "unit": info["unit"],
+                   "quantityKind": info.get("quantityKind"), "datatype": info["datatype"],
+                   "description": info.get("description", "")}
+            for name, info in reference.parameters.items()
+        }
+    else:
+        filtered_parameter_fields = build_parameter_fields(final_metadata)
+        if not skip_inference and getattr(args, "parameter_names", "neutral") == "neutral":
+            _assign_neutral_names(filtered_parameter_fields)
     filtered_metric_fields = build_metric_fields(final_metric_metadata) if not skip_inference else {}
 
     _print_step_header(5, "Generate")
 
     if skip_inference:
         return _generate_snakefile_only(
-            args, module_dir, filtered_parameter_fields, outputs_selection,
+            args, module_dir, repo_root, adapter, texts, filtered_parameter_fields, outputs_selection,
             readme_path, executable_name, module_relative_path,
         )
 
     # 5. Process Cases & Build Graph
     manifest = build_manifest(
-        read_text(problem_hh_path), read_text(main_cc_path), benchmark_description,
+        "\n".join(texts.values()), "", benchmark_description,
         read_text(readme_path) if readme_path else "",
         read_text(authors_path) if authors_path else "",
         authors_path.name if authors_path else None,
+        label=(reference.label if reference is not None and reference.label else None)
+              or adapter.benchmark_label(module_dir, docs_root, texts),
+        software_label=adapter.name,
+        citation_cff=citation_cff,
     )
     apply_semantic_overrides(manifest, args, module_dir, benchmark_description)
-    cases = discover_cases(module_dir)
+    if reference is not None:
+        cases = [(None, conf["id"]) for conf in reference.configurations]
+    else:
+        cases = adapter.discover_cases(module_dir)
 
     builder = GraphBuilder(manifest, filtered_parameter_fields, filtered_metric_fields, benchmark_description)
     metric_ids = builder.ensure_metric_fields(metric_keys)
 
     config_ids = []
-    for case_dir, case_id in cases:
+    for conf in (reference.configurations if reference is not None else []):
+        values = {k: v for k, v in conf["values"].items() if k in filtered_parameter_fields}
+        config_ids.append(builder.add_configuration(conf["id"], conf["label"] or conf["id"], values))
+    for case_dir, case_id in (cases if reference is None else []):
         try:
-            params = resolve_case_params(case_dir, filtered_parameter_fields)
+            params = adapter.resolve_case_params(case_dir, filtered_parameter_fields)
         except ValueError as exc:
             sys.exit(f"Error: {exc}")
         cell_parts = []
@@ -1792,6 +1906,15 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
 
     builder.add_benchmark_node(config_ids, metric_ids)
     builder.add_rocrate_root()
+
+    mapping = _build_mapping(args, adapter, reference, filtered_parameter_fields, raw_candidates,
+                             mapped_inputs if reference is not None else None)
+    mapping_notes = mapping.checks.get("summary", []) if mapping is not None else []
+    if mapping is not None:
+        mapping_path = args.output.with_name(args.output.stem + ".mapping.json")
+        mapping.write(mapping_path)
+        if args.verbose:
+            print(f"Wrote {mapping_path}")
 
     doc = {"@context": DEFAULT_CONTEXT, "@graph": builder.graph}
     args.output.write_text(json.dumps(doc, indent=2), encoding="utf-8")
@@ -1825,6 +1948,8 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     build_hints = {
         "executable_name": executable_name,
         "module_relative_path": module_relative_path,
+        "software": adapter.name,
+        **adapter.build_hints(module_dir, repo_root),
     }
     build_hints_path = args.output.with_name(args.output.stem + ".build_hints.json")
     build_hints_path.write_text(json.dumps(build_hints, indent=2), encoding="utf-8")
@@ -1844,15 +1969,16 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         print("(skipped -- --skip-validation)")
 
     if not args.verbose:
-        print(f"\n✓ Wrote {args.output.name} ({len(final_metadata)} parameters, "
+        print(f"\n✓ Wrote {args.output.name} ({len(filtered_parameter_fields)} parameters, "
               f"{len(final_metric_metadata)} metrics, {len(cases)} case(s))")
 
     return {
-        "parameters": len(final_metadata),
+        "parameters": len(filtered_parameter_fields),
         "metrics": len(final_metric_metadata),
         "cases": len(cases),
         "rocrate_validation_passed": rocrate_passed,
         "outputs": outputs_selection,
+        "mapping_notes": mapping_notes,
     }
 
 
@@ -1871,9 +1997,252 @@ def _guess_static_datatype(raw_value: str) -> str:
     return "schema:String"
 
 
+MAPPING_CACHE = ".parameter_mapping_cache.json"
+
+
+def _placeholder_of(candidate) -> str | None:
+    m = re.match(r"^\{(\w+)\}$", (candidate.value or "").strip())
+    return m.group(1) if m else None
+
+
+def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, benchmark_description: str) -> list:
+    """Map the selected software inputs onto the reference benchmark's
+    parameters: cached answers first, then the LLM for the rest, then an
+    interactive review. Returns [InputMapping, ...] in candidate order."""
+    names = sorted(reference.parameters)
+    cache_file = module_dir / MAPPING_CACHE
+    if getattr(args, "clear_cache", False) and cache_file.exists():
+        cache_file.unlink()
+    cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    items: dict[str, dict] = cache.get("items", {}) if cache.get("reference_parameters") == names else {}
+
+    def ck(c) -> str:
+        return f"{c.section}\u001f{c.key}"
+
+    missing = [c for c in candidates if ck(c) not in items]
+    if missing:
+        resolved_model = args.model or PROVIDER_CONFIG[args.provider]["default_model"]
+        print(f"\nQuerying {args.provider} ({resolved_model}) to map {len(missing)} {adapter.name} input(s) "
+              f"onto {len(names)} benchmark parameter(s)...")
+        try:
+            answers = infer_parameter_mapping(
+                candidates=missing,
+                reference_parameters=reference.parameters,
+                example_values=reference.configurations[0]["values"] if reference.configurations else {},
+                software=adapter.name,
+                benchmark_description=benchmark_description,
+                provider=args.provider,
+                model=args.model,
+                verbose=args.verbose,
+                debug=getattr(args, "debug", False),
+                tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
+                allow_model_fallback=not getattr(args, "no_model_fallback", False),
+            )
+        except (RuntimeError, ValueError) as exc:
+            if not args.fallback_on_error:
+                sys.exit(f"Error: {args.provider} input mapping failed -- {exc}\n"
+                         "Pass --fallback-on-error to continue with the inputs unmapped.")
+            print(f"Warning: input mapping failed ({exc}); continuing with the inputs unmapped.", file=sys.stderr)
+            answers = [{"ini": [c.section, c.key], "expression": None, "confidence": 0.0,
+                        "explanation": "Not mapped: the LLM call failed."} for c in missing]
+        for a in answers:
+            items[f"{a['ini'][0]}\u001f{a['ini'][1]}"] = a
+    else:
+        print("Using cached input mapping (loaded from local file, 0 API queries triggered).")
+
+    result = []
+    for c in candidates:
+        a = items[ck(c)]
+        result.append(InputMapping(
+            section=c.section, key=c.key, display=input_display(c.section, c.key, adapter.name),
+            expression=a.get("expression"), template_value=c.value, confidence=a.get("confidence"),
+            explanation=a.get("explanation", ""), placeholder=_placeholder_of(c),
+        ))
+
+    if not args.skip_review and sys.stdin.isatty():
+        result = _review_mapping_screen(result, reference, args) or _review_mapping(result, reference)
+    for m in result:
+        items[f"{m.section}\u001f{m.key}"] = {"ini": [m.section, m.key], "expression": m.expression,
+                                               "confidence": m.confidence, "explanation": m.explanation}
+    cache_file.write_text(json.dumps({"reference_parameters": names, "items": items}, indent=2), encoding="utf-8")
+    return result
+
+
+def _review_mapping_screen(inputs: list, reference, args) -> list | None:
+    """The mapping review in the same curses UI as the semantic review
+    (ai.tui.mapping_review_queue). None if curses isn't usable or the
+    reviewer quit to plain text -- the caller then uses _review_mapping()."""
+    try:
+        from ai import tui
+    except ImportError:
+        return None
+    if not tui.available():
+        return None
+    example = reference.configurations[0] if reference.configurations else {"id": "-", "values": {}}
+    names = set(reference.parameters)
+    items = [{"display": m.display, "expression": m.expression, "template_value": m.template_value,
+              "confidence": m.confidence, "explanation": m.explanation} for m in inputs]
+    done = tui.mapping_review_queue(
+        items, getattr(args, "review_confidence_threshold", 0.7), example["id"],
+        render_example=lambda expr: render(expr, example["values"]),
+        check_expression=lambda expr: check_expression(expr, names),
+    )
+    if not done:
+        if getattr(tui, "LAST_ERROR", None):
+            print(f"note: the review screen couldn't open ({tui.LAST_ERROR}); using the plain-text review.")
+        return None
+    for m, it in zip(inputs, items):
+        m.expression, m.confidence, m.explanation = it["expression"], it["confidence"], it["explanation"]
+    return inputs
+
+
+def _review_mapping(inputs: list, reference) -> list:
+    """Plain-text review of the input mapping: Enter accepts, a row number
+    edits that input's expression."""
+    example = reference.configurations[0] if reference.configurations else {"id": "-", "values": {}}
+    names = set(reference.parameters)
+    while True:
+        print(f"\n=== Input mapping (example values: configuration {example['id']}) ===")
+        for i, m in enumerate(inputs):
+            if m.expression:
+                try:
+                    shown = render(m.expression, example["values"])
+                except Exception as exc:  # noqa: BLE001
+                    shown = f"error: {exc}"
+                rhs = f"{m.expression}   -> {shown}"
+            else:
+                rhs = "(not mapped -- keeps its own value)"
+            conf = f"  [{m.confidence:.2f}]" if m.confidence is not None else ""
+            print(f"  {i:2d} {m.display}{conf}\n       = {rhs}")
+        print(f"\nBenchmark parameters: {', '.join(sorted(names))}")
+        choice = input("Enter = accept, number = edit that input's expression: ").strip()
+        if choice == "":
+            return inputs
+        if not choice.isdigit() or not 0 <= int(choice) < len(inputs):
+            print("Not a valid row number.")
+            continue
+        m = inputs[int(choice)]
+        new = input(f"New expression for {m.display} (e.g. {{cells_radial // 2}}; 'null' = not mapped; "
+                    "Enter = keep): ").strip()
+        if not new:
+            continue
+        if new.lower() in ("null", "none"):
+            m.expression, m.explanation, m.confidence = None, "set to not mapped by the reviewer", 1.0
+            continue
+        problem = check_expression(new, names)
+        if problem:
+            print(f"Not accepted: {problem}")
+            continue
+        m.expression, m.explanation, m.confidence = new, "set by the reviewer", 1.0
+
+
+def _build_mapping(args, adapter, reference, fields: dict[str, Any], raw_candidates, mapped_inputs):
+    """The <name>_mapping.json content: reference mode uses the reviewed
+    expressions (and is checked against every configuration); neutral
+    naming without a reference gets a 1:1 mapping. None for
+    --parameter-names software."""
+    if reference is not None:
+        mapping = ParameterMapping(
+            software=adapter.name, inputs=mapped_inputs,
+            benchmark_parameters={n: {"unit": i["unit"], "quantityKind": i.get("quantityKind")}
+                                  for n, i in reference.parameters.items()},
+            reference={"file": str(args.reference_benchmark), "label": reference.label,
+                       "configurations": [c["id"] for c in reference.configurations]},
+        )
+        problems = check_against_configurations(mapping, reference.configurations)
+        consistency = template_consistency(mapping, reference.configurations)
+        notes = [f"Mapping: {len(mapping.mapped)}/{len(mapping.inputs)} {adapter.name} input(s) set from the "
+                 "benchmark parameters."]
+        unused = mapping.unused_parameters()
+        if unused:
+            notes.append(f"warning: benchmark parameter(s) not used by any {adapter.name} input: {', '.join(unused)} "
+                         "-- this implementation ignores them (fine only if every configuration uses the value "
+                         "the software has built in).")
+        notes += [f"warning: {p}" for p in problems]
+        notes += [f"note: {d}'s template value is not reproduced by any configuration (fine if the template is "
+                  "none of them)." for d, hits in consistency.items() if not hits]
+        if not problems:
+            notes.append(f"  ✓ all expressions evaluate for the {len(reference.configurations)} configuration(s)")
+        mapping.checks["summary"] = notes
+        print("\n" + "\n".join(notes))
+        return mapping
+    if getattr(args, "parameter_names", "neutral") != "neutral":
+        return None
+    by_key = {(c.section, c.key): c for c in raw_candidates}
+    inputs = []
+    for spec in fields.values():
+        section, key = spec["ini"]
+        c = by_key.get((section, key))
+        template = c.value if c else ""
+        inputs.append(InputMapping(
+            section=section, key=key, display=input_display(section, key, adapter.name),
+            expression=identity_expression(spec["label"], template, spec.get("index"), bool(spec.get("full_value"))),
+            template_value=template, placeholder=_placeholder_of(c) if c else None,
+        ))
+    return ParameterMapping(
+        software=adapter.name, inputs=inputs,
+        benchmark_parameters={s["label"]: {"unit": s["unit"], "quantityKind": s.get("quantityKind")}
+                              for s in fields.values()},
+    )
+
+
+def _assign_neutral_names(fields: dict[str, Any]) -> None:
+    """Give every parameter field a unique software-neutral label derived
+    from its reviewed semantic name (see metadata.mapping.neutral_name)."""
+    used: dict[str, int] = {}
+    for spec in fields.values():
+        base = neutral_name(spec.get("semantic_name") or "_".join(spec["ini"]))
+        used[base] = used.get(base, 0) + 1
+        label = base if used[base] == 1 else f"{base}_{used[base]}"
+        if used[base] == 2:
+            print(f"warning: two parameters were both named {base!r}; the second becomes {label!r} "
+                  "(rename one in the review to fix).", file=sys.stderr)
+        spec["label"] = label
+
+
+def _repository_root(path: Path) -> Path:
+    """The enclosing git repository's root (a folder containing .git), or
+    `path` itself when it isn't inside one."""
+    for candidate in (path, *path.resolve().parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return path
+
+
+def _candidate_display(c, all_candidates) -> str:
+    """How a parameter is shown in the selection list: just the key when
+    it's unique (the DuMuX case), otherwise section-qualified."""
+    if sum(1 for o in all_candidates if o.key == c.key) > 1:
+        return f"{c.section}:{c.key}"
+    return c.key
+
+
+def _scenario_param_lookup(candidates) -> dict[str, Any]:
+    """Names --scenario-params may use for a parameter (lower-case): the
+    key itself, 'section.key' / 'section:key', and the last path component
+    of a nested key (e.g. 'omega' for OpenFOAM 'MRF1/omega') -- the short
+    forms only when they are unambiguous."""
+    lookup: dict[str, Any] = {}
+    ambiguous: set[str] = set()
+    for c in candidates:
+        for alias in {c.key.lower(), c.key.split("/")[-1].lower()}:
+            if alias in lookup and lookup[alias] is not c:
+                ambiguous.add(alias)
+            lookup.setdefault(alias, c)
+    for alias in ambiguous:
+        lookup.pop(alias, None)
+    for c in candidates:
+        lookup[f"{c.section}.{c.key}".lower()] = c
+        lookup[f"{c.section}:{c.key}".lower()] = c
+    return lookup
+
+
 def _generate_snakefile_only(
     args: argparse.Namespace,
     module_dir: Path,
+    repo_root: Path,
+    adapter,
+    texts: dict[str, str],
     filtered_parameter_fields: dict[str, Any],
     outputs_selection: dict[str, bool],
     readme_path: Path | None,
@@ -1893,13 +2262,13 @@ def _generate_snakefile_only(
     `readme_path`/`executable_name`/`module_relative_path` are reused as-is
     from _build_impl()'s Discover step, not recomputed here.
     """
-    problem_hh_path = module_dir / "problem.hh"
-    main_cc_path = module_dir / "main.cc"
     manifest = build_manifest(
-        read_text(problem_hh_path), read_text(main_cc_path), "",
+        "\n".join(texts.values()), "", "",
         read_text(readme_path) if readme_path else "",
+        label=adapter.benchmark_label(module_dir, repo_root, texts),
+        software_label=adapter.name,
     )
-    cases = discover_cases(module_dir)
+    cases = adapter.discover_cases(module_dir)
     if not cases:
         sys.exit(f"Error: no benchmark cases found under {module_dir} -- nothing to build a Snakefile from.")
 
@@ -1907,7 +2276,7 @@ def _generate_snakefile_only(
     config_ids = []
     for case_dir, case_id in cases:
         try:
-            params = resolve_case_params(case_dir, filtered_parameter_fields)
+            params = adapter.resolve_case_params(case_dir, filtered_parameter_fields)
         except ValueError as exc:
             sys.exit(f"Error: {exc}")
         config_ids.append(builder.add_configuration(case_id, case_id, params))
@@ -1955,11 +2324,13 @@ def _generate_snakefile_only(
 def _infer_and_review(
     args: argparse.Namespace,
     module_dir: Path,
+    repo_root: Path,
+    adapter,
+    texts: dict[str, str],
     selected_candidates: list,
     raw_candidates: list,
-    main_cc_path: Path,
-    problem_hh_path: Path,
     benchmark_description: str,
+    known_metrics: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict], list[str]]:
     """Cache lookup + Groq/OpenAI inference + the combined interactive
     review, for both parameters and metrics. This is the ONLY place in the
@@ -1985,7 +2356,7 @@ def _infer_and_review(
         dropped = len(metadata_cache) - len(pruned_metadata_cache)
         print(
             f"Pruned {dropped} stale parameter cache entr{'y' if dropped == 1 else 'ies'} "
-            "no longer present in params.input.",
+            f"no longer present in {adapter.input_label}.",
             file=sys.stderr,
         )
         save_cache(module_dir, pruned_metadata_cache)
@@ -2016,8 +2387,8 @@ def _infer_and_review(
         try:
             new_inferred = infer_parameter_metadata(
                 candidates=missing_candidates,
-                main_cc=read_text(main_cc_path),
-                problem_hh=read_text(problem_hh_path),
+                main_cc="\n".join(texts.values()),
+                problem_hh="",
                 benchmark_description=benchmark_description,
                 provider=args.provider,
                 model=args.model,
@@ -2062,7 +2433,7 @@ def _infer_and_review(
             # still be edited during the review step below, and the cache
             # should hold the FINAL (possibly human-corrected) values, not
             # the raw AI output. See the save_cache() call after review.
-    else:
+    elif selected_candidates:
         print("Using cached parameter metadata (loaded from local file, 0 API queries triggered).")
 
     # NOTE: --full-value-params is applied by the caller (_build_impl), once,
@@ -2072,7 +2443,7 @@ def _infer_and_review(
     # 4b. Cache Management & AI Inference for output/solution METRICS
     #     (same idea as step 4, but for the JSON keys main.cc writes out,
     #     inferred in SI units rather than picked from KNOWN_METRIC_UNITS.)
-    metric_candidates = discover_metrics_from_maincc(main_cc_path)
+    metric_candidates = adapter.discover_metrics(module_dir, repo_root)
     metric_keys = [c.key for c in metric_candidates]
 
     metric_cache = load_metric_cache(module_dir) or []
@@ -2096,7 +2467,9 @@ def _infer_and_review(
     final_metric_metadata = []
     missing_metric_candidates = []
     for candidate in metric_candidates:
-        if candidate.key in metric_cache_lookup:
+        if known_metrics and candidate.key in known_metrics:
+            final_metric_metadata.append(dict(known_metrics[candidate.key]))
+        elif candidate.key in metric_cache_lookup:
             final_metric_metadata.append(metric_cache_lookup[candidate.key])
         else:
             missing_metric_candidates.append(candidate)
@@ -2111,8 +2484,8 @@ def _infer_and_review(
         try:
             new_inferred_metrics = infer_metric_metadata(
                 candidates=missing_metric_candidates,
-                main_cc=read_text(main_cc_path),
-                problem_hh=read_text(problem_hh_path),
+                main_cc="\n".join(texts.values()),
+                problem_hh="",
                 benchmark_description=benchmark_description,
                 provider=args.provider,
                 model=args.model,
@@ -2156,7 +2529,8 @@ def _infer_and_review(
         print("Using cached metric metadata (loaded from local file, 0 API queries triggered).")
 
     if not args.verbose:
-        print(f"\n✓ {len(final_metadata)} parameter(s) analyzed")
+        if selected_candidates:
+            print(f"\n✓ {len(final_metadata)} parameter(s) analyzed")
         print(f"✓ {len(final_metric_metadata)} metric(s) analyzed")
 
     # 4c. Interactive review -- parameters AND metrics go through ONE
