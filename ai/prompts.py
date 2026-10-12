@@ -7,7 +7,9 @@ ai.prompts
 
 LLM system/user prompt templates for parameter and metric metadata
 inference, and the functions that fill them in with the discovered
-candidates plus source-code context.
+candidates plus source-code context. The templates are software-neutral:
+the simulation code's name and its own notes (software/<name>/prompt.md,
+see SoftwareAdapter.prompt_context()) are filled in per run.
 """
 
 from __future__ import annotations
@@ -20,17 +22,16 @@ if TYPE_CHECKING:
     from metadata.metrics import MetricCandidate
     from metadata.parameters import ParameterCandidate
 
-SYSTEM_PROMPT = """\
-You are an expert in Computational Fluid Dynamics, DuMux, OpenFOAM,
+_SYSTEM_PROMPT = """\
+You are an expert in Computational Fluid Dynamics, <<SOFTWARE>>,
 scientific metadata, QUDT units, and JSON-LD.
 
 Your task is to infer semantic metadata for the input parameters of a
-simulation code -- e.g. entries of a DUNE/DuMux params.input INI file, or of
-OpenFOAM case dictionaries. Each parameter is identified by "ini":
-[section, key]: for an INI file the [Section] and the key; for OpenFOAM the
-dictionary file (e.g. "constant/MRFProperties") and the entry path (e.g.
-"MRF1/omega"). A value of the form "{name}" is a template placeholder: the
-value is set per benchmark run, so infer from the name, hint and context.
+<<SOFTWARE>> simulation. Each parameter is identified by "ini":
+[section, key]; what the section and the key are depends on the software
+(see "software-specific notes" below). A value of the form "{name}" is a
+template placeholder: the value is set per benchmark run, so infer from the
+name, hint and context.
 
 For every parameter infer:
   - semantic_name
@@ -67,19 +68,17 @@ NEVER be confused:
       quantityKind DimensionlessRatio / Count -> unit unit:UNITLESS
 
 Some parameter entries include a "cpp_hint" field and a "code_context"
-field: cpp_hint is scraped directly from the source -- for DuMux the
-getParam<Type>("Section.Key") call site (e.g. the exact C++ variable name
-and type it is assigned to, such as `density_` of type `Scalar`), for
-OpenFOAM the dictionary and entry the value lives in;
-code_context is a short excerpt of the actual surrounding source code at
-that same call site. Treat these as strong, code-grounded evidence of the
-parameter's physical meaning and prefer them over guessing from the key
-name alone -- e.g. a variable named `density_`/`rho_` implies kg/m3, a
-variable read as `omega_`/an angular velocity implies rad/s, `viscosity_`
-(dynamic) implies Pa*s, `radius_`/`length_` implies m; in OpenFOAM, `nu` is
-a kinematic viscosity (m2/s) and an MRF `omega` an angular velocity (rad/s).
-A parameter with neither field has no code hint -- infer from the key name,
-value, and benchmark description instead.
+field: cpp_hint is scraped directly from the source and says where and how
+the value is read; code_context is a short excerpt of the actual
+surrounding source at that same place (see "software-specific notes"
+below for what both contain for this software). Treat these as strong,
+code-grounded evidence of the parameter's physical meaning and prefer them
+over guessing from the key name alone -- the notes below list naming
+conventions that imply units. A parameter with neither field has no code
+hint -- infer from the key name, value, and benchmark description instead.
+
+software-specific notes (<<SOFTWARE>>):
+<<SOFTWARE_CONTEXT>>
 
 You may also be shown "known corrections from prior human review": cases
 where a human reviewer corrected an earlier AI guess for a similarly named
@@ -237,14 +236,13 @@ def _format_known_corrections(known_corrections: list[dict] | None) -> str:
 
 def build_prompt(
     candidates: list[ParameterCandidate],
-    main_cc: str,
-    problem_hh: str,
+    source_text: str,
     benchmark_description: str = "",
     known_corrections: list[dict] | None = None,
 ) -> str:
-    """`main_cc`/`problem_hh` are used ONLY as a fallback-search source for
-    whichever `candidates` have no cpp_hint/code_context of their own (see
-    metadata.parameters.attach_cpp_hints) -- the full text is deliberately
+    """`source_text` (the software adapter's source files, joined) is used
+    ONLY as a fallback-search source for whichever `candidates` have no
+    cpp_hint/code_context of their own -- the full text is deliberately
     NOT embedded in the prompt itself; that's what used to dominate prompt
     size (see ai.inference's 404/413 handling for what that caused).
     """
@@ -254,7 +252,7 @@ def build_prompt(
         n_items=len(candidates),
         parameter_json=json.dumps([asdict(c) for c in candidates], indent=2),
         known_corrections=_format_known_corrections(known_corrections),
-        fallback_context=_fallback_context_section(missing, main_cc, problem_hh),
+        fallback_context=_fallback_context_section(missing, source_text),
     )
 
 
@@ -262,8 +260,8 @@ def build_prompt(
 # Metric (output/solution quantity) prompts
 # ------------------------------------------------------------
 
-METRIC_SYSTEM_PROMPT = """\
-You are an expert in Computational Fluid Dynamics, DuMux, OpenFOAM,
+_METRIC_SYSTEM_PROMPT = """\
+You are an expert in Computational Fluid Dynamics, <<SOFTWARE>>,
 scientific metadata, QUDT units, and JSON-LD.
 
 Your task is to infer semantic metadata for SOLUTION METRICS: output
@@ -380,12 +378,11 @@ def _format_known_metric_corrections(known_corrections: list[dict] | None) -> st
 
 def build_metric_prompt(
     candidates: list[MetricCandidate],
-    main_cc: str,
-    problem_hh: str,
+    source_text: str,
     benchmark_description: str = "",
     known_corrections: list[dict] | None = None,
 ) -> str:
-    """`main_cc`/`problem_hh` are used ONLY as a fallback-search source for
+    """`source_text` is used ONLY as a fallback-search source for
     whichever `candidates` somehow have no `context` of their own (in
     practice this is essentially never -- metadata.metrics.discover_metrics()
     always fills `context` for every candidate it creates) -- see
@@ -397,7 +394,20 @@ def build_metric_prompt(
         n_items=len(candidates),
         metric_json=json.dumps([asdict(c) for c in candidates], indent=2),
         known_corrections=_format_known_metric_corrections(known_corrections),
-        fallback_context=_fallback_context_section(missing, main_cc, problem_hh),
+        fallback_context=_fallback_context_section(missing, source_text),
     )
 
 
+def _fill(template: str, software_name: str, software_context: str) -> str:
+    return (template.replace("<<SOFTWARE>>", software_name or "the simulation code")
+            .replace("<<SOFTWARE_CONTEXT>>", software_context.strip() or "(none)"))
+
+
+def parameter_system_prompt(software_name: str = "", software_context: str = "") -> str:
+    """The parameter-inference system prompt for one software: its name
+    and its own notes (SoftwareAdapter.prompt_context())."""
+    return _fill(_SYSTEM_PROMPT, software_name, software_context)
+
+
+def metric_system_prompt(software_name: str = "") -> str:
+    return _fill(_METRIC_SYSTEM_PROMPT, software_name, "")

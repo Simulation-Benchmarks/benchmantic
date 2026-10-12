@@ -1,0 +1,31 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+geom
+{
+    r0      1.0;
+    r1      2.0;
+    nr      16;
+    ntheta  32;
+    grading 1.0;
+}
+
+blockInfo   ($/geom/nr $/geom/ntheta 1);
+
+convertToMeters 1;
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) $blockInfo simpleGrading ($/geom/grading 1 1)
+    hex (1 8 9 2 5 10 11 6) $blockInfo simpleGrading ($/geom/grading 1 1)
+);

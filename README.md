@@ -162,7 +162,7 @@ The software is detected from the files (override with `--software dumux|openfoa
 | DuMux | `main.cc` + `problem.hh` | `params.input` entries, with `getParam<T>()` call sites as context | JSON keys written in `main.cc` |
 | OpenFOAM | a case with `system/controlDict`, or a zip containing one (e.g. `output_template.zip`, unpacked to `<module>/.benchmantic/`) | dictionary entries (`constant/MRFProperties` / `MRF1/omega`), with how each is used in the file as context; template placeholders `{name}` are pre-selected | keys of the dict a Python script `json.dump`s to `solution_metrics.json` |
 
-Each simulation code is an *adapter* in `metadata/adapters/`; adding another code means implementing one class (find the module, list inputs, metrics and cases).
+Each simulation code is one folder under `software/` -- see [Adding a simulation code](#adding-a-simulation-code).
 
 **Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:
 
@@ -223,20 +223,17 @@ benchmantic/
 ├── utils.py                   # shared string/number/file helpers
 ├── metadata/                  # benchmark.jsonld generation
 │   ├── builder.py             #   orchestrates manifest + RO-Crate @graph construction (benchmark + dataset docs)
-│   ├── adapters/              #   one adapter per simulation code (DuMux, OpenFOAM): inputs, metrics, cases
-│   ├── foam_dict.py           #   OpenFOAM dictionary reader
 │   ├── mapping.py             #   benchmark parameters -> software inputs: expressions, checks, mapping file
 │   ├── reference.py           #   reads an existing benchmark description (--reference-benchmark)
 │   ├── graph.py               #   shared @id-resolution / node-lookup helpers
 │   ├── repo_source.py         #   resolves module_dir: local path, or clone/update a git URL
-│   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CMake discovery
-│   ├── parameters.py          #   parameter discovery + case resolution
-│   ├── metrics.py             #   output/solution metric discovery
+│   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CITATION.cff
+│   ├── parameters.py          #   ParameterCandidate + RO-Crate parameter fields
+│   ├── metrics.py             #   MetricCandidate, metric-key scanners + RO-Crate metric fields
 │   ├── mardi.py               #   MaRDI portal lookup (research problem / mathematical model)
-│   ├── publication.py         #   literature citation extraction
-│   └── software.py            #   simulation-software detection (DuMux, OpenFOAM, ...)
+│   └── publication.py         #   literature citation extraction
 ├── ai/                        # LLM-based semantic metadata inference
-│   ├── prompts.py              #   prompt templates for parameters and metrics
+│   ├── prompts.py              #   prompt templates (software name + its prompt.md filled in per run)
 │   ├── mapping.py              #   LLM proposal of input -> benchmark-parameter expressions
 │   ├── inference.py            #   provider config + request/retry loop
 │   ├── validation.py           #   response validation and repair
@@ -244,10 +241,50 @@ benchmantic/
 │   ├── tui.py                    #   optional curses UI for parameter selection + the review queue
 │   ├── cache.py                 #   on-disk inference caching + Outputs-step selection persistence (per module)
 │   └── corrections.py           #   cross-benchmark human-correction memory
-└── snakefile/                  # executable-workflow generation
-    ├── generator.py             #   derives Snakefile inputs from benchmark.jsonld
-    └── renderer.py               #   renders the actual Snakefile text
+├── snakefile/                  # executable-workflow generation
+│   ├── generator.py             #   reads benchmark.jsonld, asks the software for its Snakefile, writes it
+│   └── renderer.py               #   shared pieces: parameters.json keys, parameter assignments
+├── software/                   # one folder per simulation code -- the only software-specific code
+│   ├── __init__.py              #   registry: every sub-folder exporting `Adapter` is picked up
+│   ├── base.py                  #   SoftwareAdapter: the contract each code implements
+│   ├── _template/               #   copy this to add a code
+│   ├── dumux/
+│   │   ├── adapter.py           #     DuMux adapter (main.cc + problem.hh module)
+│   │   ├── inputs.py            #     params.input reader, getParam<T>() hints, case values
+│   │   ├── sources.py           #     module search, CMake target, Doxygen text, cases, main.cc metrics
+│   │   ├── snakefile.py         #     -Section.Key flag Snakefiles, --mesh-split, DuMux options
+│   │   └── prompt.md            #     notes for the LLM
+│   └── openfoam/
+│       ├── adapter.py           #     OpenFOAM adapter (case dictionaries, zipped templates, metrics script)
+│       ├── foam_dict.py         #     dictionary reader
+│       ├── snakefile.py         #     placeholder/foamDictionary Snakefiles
+│       └── prompt.md            #     notes for the LLM
+└── tests/                      # adapter checks against tests/fixtures/<software>/
 ```
+
+## Adding a simulation code
+
+All software-specific code lives in `software/<name>/`; the pipeline steps
+(discover → select → infer & review → generate → validate) are the same for
+every code and only call the adapter. To add, say, FEniCS:
+
+1. Copy `software/_template/` to `software/fenics/`. The folder name is the
+   `--software` value, and the registry picks the folder up by itself --
+   nothing else in the repository needs to change.
+2. In `adapter.py`, implement discovery: `detect`, `find_module_dir`,
+   `discover_parameters`, `discover_metrics`, `discover_cases`,
+   `resolve_case_params` (see `software/base.py`; DuMux and OpenFOAM are two
+   complete examples). Shared helpers such as
+   `metadata.metrics.discover_metrics_in_python` (metric keys of a dict
+   dumped to `solution_metrics.json`) can be reused.
+3. In `snakefile.py`, write how one case is run; in `prompt.md`, tell the LLM
+   what an input's `(section, key)` pair means and which names imply units.
+   Options only this code needs go in `add_arguments` /
+   `add_snakefile_arguments`; they appear under their own heading in `--help`.
+4. Add a small example to `tests/fixtures/fenics/` and run
+   `python3 -m pytest tests` -- every adapter is checked against its example
+   (recognised by itself only, parameters/metrics/cases found, case values
+   resolved, prompt notes and Snakefile present).
 
 ## License
 

@@ -42,32 +42,24 @@ from ai.inference import (
     infer_metric_metadata, infer_parameter_metadata,
 )
 from ai import review
-from metadata.metrics import (
-    DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metric_fields,
-    discover_metrics_from_maincc,
-)
-from metadata.parameters import (
-    DEFAULT_SCENARIO_SECTIONS, attach_cpp_hints, build_parameter_fields,
-    default_scenario_candidates, discover_parameters, resolve_case_params,
-)
+from metadata.metrics import DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metric_fields
+from metadata.parameters import build_parameter_fields
 from metadata import mardi
-from metadata.adapters import SOFTWARE_CHOICES, get_adapter
+import software
+from software import SOFTWARE_CHOICES, get_adapter
 from metadata.mapping import (
     InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
-    input_display, neutral_name, render, template_consistency,
+    neutral_name, render, template_consistency,
 )
 from metadata.reference import discover_reference, load_reference
 from ai.mapping import infer_parameter_mapping
 from metadata.publication import extract_publication_citation, extract_publication_doi
 from metadata.repository import (
-    discover_cases, extract_authors_file_hint, extract_authors_list,
-    extract_benchmark_description, extract_class_label, extract_publisher_from_repo_url,
+    extract_authors_file_hint, extract_authors_list, extract_publisher_from_repo_url,
     extract_readme_dependencies, extract_readme_description, extract_readme_license,
-    extract_readme_repo_url, extract_spdx_info, find_authors_file, find_executable_name, find_repo_file,
+    extract_readme_repo_url, extract_spdx_info, find_authors_file, find_readme, find_repo_file,
     read_citation_cff,
-    find_module_dir, find_readme,
 )
-from metadata.software import detect_software_label
 from utils import read_text, slugify, to_number
 from metadata import repo_source
 
@@ -186,8 +178,7 @@ MANIFEST_FALLBACKS: dict[str, Any] = {
 
 
 def build_manifest(
-    problem_hh_text: str,
-    main_cc_text: str,
+    source_text: str,
     benchmark_description: str,
     readme_text: str = "",
     authors_text: str = "",
@@ -197,8 +188,10 @@ def build_manifest(
     citation_cff: dict | None = None,
 ) -> dict[str, Any]:
     """Derive the RO-Crate manifest (crate label, license, software, etc.)
-    from problem.hh/main.cc instead of a hardcoded DEFAULT_MANIFEST or an
-    external --manifest file. Falls back to MANIFEST_FALLBACKS for anything
+    from the benchmark's sources (`source_text`: the software adapter's
+    source_texts(), joined) instead of a hardcoded DEFAULT_MANIFEST or an
+    external --manifest file. `label` and `software_label` come from the
+    software adapter. Falls back to MANIFEST_FALLBACKS for anything
     that genuinely isn't recoverable from source (e.g. a version number, or
     a formal "investigates" ontology/QID mapping).
 
@@ -213,8 +206,8 @@ def build_manifest(
     / extract_readme_dependencies() / extract_publisher_from_repo_url() /
     extract_authors_list().
     """
-    spdx = extract_spdx_info(problem_hh_text, main_cc_text)
-    class_label = label or extract_class_label(problem_hh_text, main_cc_text)
+    spdx = extract_spdx_info(source_text)
+    class_label = label
     citation = extract_publication_citation(benchmark_description)
     publication_doi = extract_publication_doi(benchmark_description)
     readme_license_id = extract_readme_license(readme_text)
@@ -275,7 +268,7 @@ def build_manifest(
         # --math-model-label / --math-model-id (see apply_semantic_overrides()).
         "model_qid": None,
         "model_label": f"{class_label or MANIFEST_FALLBACKS['label']} model",
-        "software_label": software_label or detect_software_label(problem_hh_text, main_cc_text) or MANIFEST_FALLBACKS["software_label"],
+        "software_label": software_label or MANIFEST_FALLBACKS["software_label"],
         "publication_label": citation or MANIFEST_FALLBACKS["publication_label"],
         # Used as the publication node's @id when present (as in the
         # reference descriptions), otherwise it stays local:publication.
@@ -627,7 +620,7 @@ class GraphBuilder:
             # fallback, in case a key somehow wasn't inferred.
             spec = KNOWN_METRIC_UNITS.get(key) or self.metric_fields.get(key)
             if spec is None:
-                print(f"warning: '{key}' (from main.cc) has no known or "
+                print(f"warning: metric '{key}' has no known or "
                       f"inferred unit annotation; defaulting to unitless.", file=sys.stderr)
                 spec = DEFAULT_METRIC_UNIT
             # @id/label stay tied to the raw metric key exactly as it appears
@@ -1343,9 +1336,9 @@ def add_mapping_args(ap) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("module_dir", type=str,
-                     help="Path to the benchmark module folder (containing main.cc, problem.hh, and "
-                          "params.input file(s)), OR a higher-level repo/checkout directory -- the script "
-                          "will search recursively for the main.cc+problem.hh pair. Also accepts a "
+                     help="Path to the benchmark implementation (e.g. a DuMux module folder or an "
+                          "OpenFOAM case), OR a higher-level repo/checkout directory -- the software's "
+                          "adapter (software/<name>/) searches it recursively. Also accepts a "
                           "GitHub/GitLab/any git-reachable URL (https://..., git://..., or an scp-like "
                           "git@host:path spec) -- by default it's cloned into a throwaway temp directory "
                           "that's deleted once this run finishes; see --keep-clone/--ref/--clone-dir/"
@@ -1372,13 +1365,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "in place. Has no effect on the default throwaway clone (already always fresh). "
                           "Ignored for a local module_dir.")
     ap.add_argument("--software", choices=SOFTWARE_CHOICES, default="auto",
-                     help="Simulation software of the benchmark implementation. Default: detected "
-                          "from the files (DuMux: main.cc + problem.hh; OpenFOAM: a case with "
-                          "system/controlDict).")
+                     help="Simulation software of the benchmark implementation (one per folder in "
+                          "software/). Default: detected from the files.")
     add_mapping_args(ap)
-    ap.add_argument("--main-cc", type=Path, default=None, dest="main_cc",
-                     help="Explicit path to main.cc, only needed if more than one main.cc+problem.hh "
-                          "pair is found under module_dir.")
+    software.add_arguments(ap)
     ap.add_argument("--output", type=Path, default=Path("metadata.jsonld"))
     add_semantic_override_args(ap)
     ap.add_argument("--scenario-params", type=str, default=None,
@@ -1791,7 +1781,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         # via describe_benchmark.py right after this step.
         print(
             "(skipped -- Snakefile-only mode: no semantic inference, no Groq/OpenAI call, "
-            "no review report. Parameter names/types are guessed statically from params.input; "
+            f"no review report. Parameter names/types are guessed statically from {adapter.input_label}; "
             "units are left unknown -- see README.md's Config files section.)"
         )
         final_metadata = [
@@ -1876,7 +1866,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
 
     # 5. Process Cases & Build Graph
     manifest = build_manifest(
-        "\n".join(texts.values()), "", benchmark_description,
+        "\n".join(texts.values()), benchmark_description,
         read_text(readme_path) if readme_path else "",
         read_text(authors_path) if authors_path else "",
         authors_path.name if authors_path else None,
@@ -2083,7 +2073,7 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
     for c in candidates:
         a = items[ck(c)]
         result.append(InputMapping(
-            section=c.section, key=c.key, display=input_display(c.section, c.key, adapter.name),
+            section=c.section, key=c.key, display=adapter.input_display(c.section, c.key),
             expression=a.get("expression"), template_value=c.value, confidence=a.get("confidence"),
             explanation=a.get("explanation", ""), placeholder=_placeholder_of(c),
         ))
@@ -2230,7 +2220,7 @@ def _build_mapping(args, adapter, reference, fields: dict[str, Any], raw_candida
         c = by_key.get((section, key))
         template = c.value if c else ""
         inputs.append(InputMapping(
-            section=section, key=key, display=input_display(section, key, adapter.name),
+            section=section, key=key, display=adapter.input_display(section, key),
             expression=identity_expression(spec["label"], template, spec.get("index"), bool(spec.get("full_value"))),
             template_value=template, placeholder=_placeholder_of(c) if c else None,
         ))
@@ -2318,7 +2308,7 @@ def _generate_snakefile_only(
     from _build_impl()'s Discover step, not recomputed here.
     """
     manifest = build_manifest(
-        "\n".join(texts.values()), "", "",
+        "\n".join(texts.values()), "",
         read_text(readme_path) if readme_path else "",
         label=adapter.benchmark_label(module_dir, repo_root, texts),
         software_label=adapter.name,
@@ -2442,8 +2432,9 @@ def _infer_and_review(
         try:
             new_inferred = infer_parameter_metadata(
                 candidates=missing_candidates,
-                main_cc="\n".join(texts.values()),
-                problem_hh="",
+                source_text="\n".join(texts.values()),
+                software_name=adapter.name,
+                software_context=adapter.prompt_context(),
                 benchmark_description=benchmark_description,
                 provider=args.provider,
                 model=args.model,
@@ -2511,7 +2502,7 @@ def _infer_and_review(
         dropped = len(metric_cache) - len(pruned_metric_cache)
         print(
             f"Pruned {dropped} stale metric cache entr{'y' if dropped == 1 else 'ies'} "
-            "no longer present in main.cc.",
+            "no longer found in the source.",
             file=sys.stderr,
         )
         save_metric_cache(module_dir, pruned_metric_cache)
@@ -2539,8 +2530,9 @@ def _infer_and_review(
         try:
             new_inferred_metrics = infer_metric_metadata(
                 candidates=missing_metric_candidates,
-                main_cc="\n".join(texts.values()),
-                problem_hh="",
+                source_text="\n".join(texts.values()),
+                software_name=adapter.name,
+                software_context=adapter.prompt_context(),
                 benchmark_description=benchmark_description,
                 provider=args.provider,
                 model=args.model,

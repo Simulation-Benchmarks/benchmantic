@@ -8,7 +8,6 @@ used across the metadata, ai, and snakefile packages.
 
 from __future__ import annotations
 
-import configparser
 import re
 from pathlib import Path
 
@@ -20,17 +19,8 @@ def read_text(path: Path | None) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def parse_dune_ini(path: Path) -> dict[str, dict[str, str]]:
-    """Parse a DUNE/DuMux params.input file into {section: {key: value}}."""
-    cp = configparser.ConfigParser(inline_comment_prefixes=("#",))
-    cp.optionxform = str
-    text = path.read_text(encoding="utf-8")
-    cp.read_string(text)
-    return {section: dict(cp.items(section)) for section in cp.sections()}
-
-
 def to_number(token: str) -> float | int | str:
-    """Convert a params.input token to int/float if possible, else leave as-is."""
+    """Convert an input-file token to int/float if possible, else leave as-is."""
     try:
         if re.fullmatch(r"[+-]?\d+", token):
             return int(token)

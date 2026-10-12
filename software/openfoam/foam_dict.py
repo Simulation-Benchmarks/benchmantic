@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-metadata.foam_dict
+software.openfoam.foam_dict
 
 A small reader for OpenFOAM dictionary files (system/controlDict,
 constant/transportProperties, 0/U, ...). It flattens a dictionary into

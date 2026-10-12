@@ -3,29 +3,32 @@
 # SPDX-License-Identifier: MIT
 
 """
-metadata.adapters.dumux
+software.dumux.adapter
 
 DuMuX / DUNE: a module folder with main.cc + problem.hh, parameters in a
 DUNE INI file (params.input) read via getParam<T>("Section.Key"), metrics
-written from main.cc as JSON keys, one params.input per case.
+written from main.cc as JSON keys, one params.input per case, a CMake
+test/executable target run with -Section.Key command-line flags.
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from typing import Any
 
-from metadata.adapters.base import SoftwareAdapter
-from metadata.metrics import discover_metrics_from_maincc
-from metadata.parameters import (
+from software.base import SnakefileContext, SnakefileResult, SoftwareAdapter
+from software.dumux import snakefile
+from software.dumux.inputs import (
     DEFAULT_SCENARIO_SECTIONS,
     attach_cpp_hints,
     default_scenario_candidates,
     discover_parameters,
     resolve_case_params,
 )
-from metadata.repository import (
+from software.dumux.sources import (
     discover_cases,
+    discover_metrics_from_maincc,
     extract_benchmark_description,
     extract_class_label,
     find_executable_name,
@@ -39,6 +42,7 @@ class DumuxAdapter(SoftwareAdapter):
     slug = "dumux"
     input_label = "params.input"
     default_selection_label = "parameters under [" + ", ".join(sorted(DEFAULT_SCENARIO_SECTIONS)) + "]"
+    default_container_shared_dir = "/dumux/shared"
 
     @classmethod
     def detect(cls, root: Path) -> bool:
@@ -82,6 +86,9 @@ class DumuxAdapter(SoftwareAdapter):
     def resolve_case_params(self, case_dir: Path, parameter_fields: dict[str, Any]):
         return resolve_case_params(case_dir, parameter_fields)
 
+    def input_display(self, section: str, key: str) -> str:
+        return f"{section}.{key}"
+
     def benchmark_description(self, module_dir: Path, texts: dict[str, str]) -> str:
         return extract_benchmark_description(texts.get("problem.hh", ""), texts.get("main.cc", ""))
 
@@ -90,3 +97,17 @@ class DumuxAdapter(SoftwareAdapter):
 
     def executable_name(self, module_dir: Path, repo_root: Path):
         return find_executable_name(module_dir, repo_root)
+
+    # --- command-line options and workflow -------------------------------------
+    @classmethod
+    def add_arguments(cls, group: argparse._ArgumentGroup) -> None:
+        group.add_argument("--main-cc", type=Path, default=None, dest="main_cc",
+                           help="Explicit path to main.cc, only needed if more than one main.cc+problem.hh "
+                                "pair is found under module_dir.")
+
+    @classmethod
+    def add_snakefile_arguments(cls, group: argparse._ArgumentGroup) -> None:
+        snakefile.add_snakefile_arguments(group)
+
+    def render_snakefile(self, ctx: SnakefileContext) -> SnakefileResult:
+        return snakefile.render(ctx)

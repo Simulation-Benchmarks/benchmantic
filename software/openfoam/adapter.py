@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-metadata.adapters.openfoam
+software.openfoam.adapter
 
 OpenFOAM: a case directory (system/controlDict, constant/, 0/) -- given
 directly, or zipped next to the benchmark's Snakefile (as in
@@ -28,10 +28,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from metadata.adapters.base import SoftwareAdapter
-from metadata.foam_dict import FoamEntry, is_foam_dict, read_foam_dict
 from metadata.metrics import METRICS_FILE_NAME, MetricCandidate, discover_metrics, discover_metrics_in_python
 from metadata.parameters import ParameterCandidate
+from software.base import SnakefileContext, SnakefileResult, SoftwareAdapter
+from software.openfoam import snakefile
+from software.openfoam.foam_dict import FoamEntry, is_foam_dict, read_foam_dict
 from utils import read_text, to_number
 
 #: Where zipped template cases are unpacked, inside the module folder.
@@ -329,3 +330,7 @@ class OpenFOAMAdapter(SoftwareAdapter):
             if e.path == "application":
                 return e.value.strip(), control
         return None, None
+
+    # --- workflow -----------------------------------------------------------------
+    def render_snakefile(self, ctx: SnakefileContext) -> SnakefileResult:
+        return snakefile.render(ctx)

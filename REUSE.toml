@@ -4,3 +4,17 @@ version = 1
 path = "**.pyc"
 SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["README.md", "SKILL.md", "software/**/prompt.md"]
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"
+
+# Minimal example implementations the adapter tests run against. Their
+# source files carry SPDX headers like a real benchmark's do (the pipeline
+# scrapes them), so this annotation overrides those.
+[[annotations]]
+path = "tests/fixtures/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"

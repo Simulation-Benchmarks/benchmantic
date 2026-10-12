@@ -5,10 +5,12 @@
 """
 snakefile.generator
 
-Derives everything the generated Snakefile needs from a benchmark.jsonld
-(case-varying parameters, executable/build-dir, software name) and
-provides the CLI (build_arg_parser/generate) that describe_benchmark.py calls
-directly.
+Reads everything the generated Snakefile needs from a benchmark.jsonld
+(case-varying parameters and their units, the build_hints sidecar, the input
+mapping), asks the benchmark's software adapter (software/<name>/) for the
+Snakefile text, and writes it with the per-case parameters.json previews.
+Provides the CLI (build_arg_parser/generate) that describe_benchmark.py
+calls directly; each software adds its own options to it.
 """
 
 from __future__ import annotations
@@ -24,10 +26,9 @@ from typing import Any
 from metadata.graph import find_all, load_graph
 from metadata.graph import node_id as _id
 from metadata.mapping import load_mapping, mapping_path_for
-from snakefile.renderer import (
-    DEFAULT_UNIT_SYMBOLS, render_mapped_dumux_snakefile, render_openfoam_snakefile, render_parameters_json,
-    render_snakefile,
-)
+from snakefile.renderer import DEFAULT_UNIT_SYMBOLS, render_parameters_json
+import software
+from software import SnakefileContext, adapter_for_label
 
 def extract_case_parameters(by_id: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """{case_id: {"Section.Key": value, ...}} for every m4i:ParameterSet in
@@ -89,14 +90,6 @@ def extract_parameter_units(by_id: dict[str, dict[str, Any]]) -> dict[str, str]:
     return units
 
 
-def repo_name_from_url(repo_url: str | None) -> str | None:
-    """'https://.../benchmarks/rotating-cylinders.git' -> 'rotating-cylinders'."""
-    if not repo_url:
-        return None
-    name = repo_url.rstrip("/").rsplit("/", 1)[-1]
-    return name[:-4] if name.endswith(".git") else name
-
-
 def derive_software_name(by_id: dict[str, dict[str, Any]]) -> str:
     """Slugify local:software's label ('DuMux' -> 'dumux') for use in the
     default 'outputs/<software_name>' output directory -- mirrors the same
@@ -123,30 +116,6 @@ def load_build_hints(metadata_jsonld_path: Path) -> dict[str, Any]:
     return json.loads(hints_path.read_text(encoding="utf-8"))
 
 
-def derive_executable(build_hints: dict[str, Any]) -> str | None:
-    return build_hints.get("executable_name")
-
-
-def derive_build_dir(build_hints: dict[str, Any], by_id: dict[str, dict[str, Any]], container_shared_dir: str) -> str | None:
-    """{container_shared_dir's parent}/{repo name}/build-cmake/{module path}
-    -- matches the convention seen in the real rotating-cylinders Snakefile
-    (container_shared_dir=/dumux/shared, build dir under /dumux/<repo>/...).
-    Returns None if either the repo URL (a real RO-Crate field, read from
-    metadata.jsonld's root entity) or the module's relative path (from the
-    build_hints.json sidecar) wasn't recoverable when metadata.jsonld was
-    generated.
-    """
-    module_relative_path = build_hints.get("module_relative_path")
-    root = by_id.get("./") or {}
-    repo_name = repo_name_from_url(root.get("codeRepository"))
-    if not module_relative_path or not repo_name:
-        return None
-    container_root = str(Path(container_shared_dir).parent)
-    return f"{container_root}/{repo_name}/build-cmake/{module_relative_path}"
-
-
-
-
 # =============================================================================
 # CLI
 # =============================================================================
@@ -158,9 +127,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--container-image", required=True,
                      help="Container image reference, e.g. git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 "
                           "-- can't be recovered from metadata.jsonld, always required.")
-    ap.add_argument("--container-shared-dir", default="/dumux/shared",
-                     help="Mount point inside the container used to save results back to the host (default: /dumux/shared). "
-                          "Also used to derive --build-dir's container-root prefix when --build-dir isn't given explicitly.")
+    ap.add_argument("--container-shared-dir", default=None,
+                     help="Mount point inside the container used to save results back to the host. "
+                          "Default: the software's own default, if it has one (DuMux: /dumux/shared).")
     ap.add_argument("--executable", default=None,
                      help="Override the executable name instead of using the one in the build_hints.json sidecar.")
     ap.add_argument("--build-dir", default=None,
@@ -176,42 +145,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           f"Defaults: {DEFAULT_UNIT_SYMBOLS}. Keep this in sync with run_benchmark.py's own "
                           "UNIT_SYMBOLS -- a mismatch here causes a KeyError at Snakemake runtime, not at "
                           "generation time.")
-    ap.add_argument("--name-flag", default="Problem.Name",
-                     help="Which 'Section.Key' (if present among the case-varying parameters) is the run's output-path/name "
-                          "flag, so its value gets the {container_shared_dir}/{results_subdir}/{configuration}/... prefix "
-                          "instead of being passed through as-is (default: Problem.Name).")
-    ap.add_argument("--zip-name-flag", default=None,
-                     help="Name the output zip '{value of this Section.Key}.zip' instead of the fixed 'results.zip' "
-                          "(e.g. --zip-name-flag Problem.Name). Off by default -- must be one of the case-varying "
-                          "parameters, or this has no effect.")
-    ap.add_argument("--exclude-flag", action="append", default=None,
-                     help="A 'Section.Key' to drop entirely from the CLI flags passed to the executable (repeatable), "
-                          "e.g. for parameters that are compile-time-only and shouldn't be passed at runtime.")
-    ap.add_argument("--mesh-split", action="store_true",
-                     help="Opt in to the rotating-cylinders benchmark's specific radial-mesh-splitting math: split a "
-                          "cells flag in half, mirror a grading flag's sign, and combine inner/outer radius with "
-                          "their midpoint into one flag. This is ONE benchmark's specific meshing convention, not "
-                          "general-purpose -- leave off (default) for any other benchmark.")
-    ap.add_argument("--radial-cells-flag", default="Grid.Cells0",
-                     help="[--mesh-split] Section.Key holding the total radial cell count to split in half (default: Grid.Cells0).")
-    ap.add_argument("--angular-cells-flag", default="Grid.Cells1",
-                     help="[--mesh-split] Section.Key holding the angular/azimuthal cell count, passed through unsplit (default: Grid.Cells1).")
-    ap.add_argument("--grading-flag", default="Grid.Grading0",
-                     help="[--mesh-split] Section.Key holding the radial grading factor, mirrored with a sign flip for "
-                          "the second mesh block (default: Grid.Grading0).")
-    ap.add_argument("--inner-radius-flag", default="Grid.Radial0",
-                     help="[--mesh-split] Section.Key holding the inner radius (r1) -- must be one of the case-varying "
-                          "parameters (default: Grid.Radial0). If this parameter's value is a list (captured via "
-                          "generate_metadata.py's --full-value-params, e.g. 'Radial0 = 1.0 1.5 2.0'), it's used "
-                          "directly and --outer-radius/--outer-radius-flag are not needed.")
-    ap.add_argument("--outer-radius-flag", default=None,
-                     help="[--mesh-split] Section.Key holding the outer radius (r2), if it's itself case-varying and "
-                          "--inner-radius-flag is a plain scalar (not a --full-value-params list). Mutually exclusive "
-                          "with --outer-radius.")
-    ap.add_argument("--outer-radius", type=float, default=None,
-                     help="[--mesh-split] Fixed outer radius (r2) value, if it's constant across all cases and "
-                          "--inner-radius-flag is a plain scalar (not a --full-value-params list). Mutually "
-                          "exclusive with --outer-radius-flag.")
     ap.add_argument("--software-name", default=None,
                      help="Software name used to build the default --output-dir ('outputs/<software-name>'). "
                           "Defaults to metadata.jsonld's local:software label, slugified (e.g. 'DuMux' -> 'dumux') "
@@ -224,6 +157,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "hand directly to run_benchmark.py's --benchmark-zip. run_benchmark.py generates its "
                           "own parameters.json per configuration from the benchmark file at runtime, so only "
                           "the Snakefile itself needs to be in this archive.")
+    software.add_snakefile_arguments(ap)
     return ap
 
 
@@ -232,13 +166,20 @@ def generate(args: argparse.Namespace) -> None:
     if not args.metadata_jsonld.exists():
         sys.exit(f"Error: {args.metadata_jsonld} does not exist")
 
-    if args.mesh_split and args.outer_radius_flag and args.outer_radius is not None:
-        sys.exit("Error: pass at most one of --outer-radius-flag / --outer-radius, not both.")
-
     by_id = load_graph(args.metadata_jsonld)
     build_hints = load_build_hints(args.metadata_jsonld)
+    mapping_file = mapping_path_for(args.metadata_jsonld)
+    mapping = load_mapping(mapping_file) if mapping_file else None
 
     software_name = args.software_name or derive_software_name(by_id)
+    label = ((mapping or {}).get("software") or build_hints.get("software")
+             or (by_id.get("local:software") or {}).get("label") or software_name)
+    adapter = adapter_for_label(label)
+    if adapter is None:
+        supported = ", ".join(a.name for a in software.ADAPTERS)
+        sys.exit(f"Error: no Snakefile support for software {label!r} (supported: {supported}).")
+    if args.container_shared_dir is None:
+        args.container_shared_dir = adapter.default_container_shared_dir
     if args.output_dir is None:
         args.output_dir = Path("outputs") / software_name
 
@@ -248,10 +189,6 @@ def generate(args: argparse.Namespace) -> None:
             f"Error: no m4i:ParameterSet nodes found in {args.metadata_jsonld} -- "
             "nothing to build case-varying CLI flags from."
         )
-    # Any one case's values are enough to know each flag's *shape* (list vs
-    # scalar) -- that's determined once, at generate_metadata.py time, by
-    # whether --full-value-params was used for it, not per-case.
-    sample_case_values = next(iter(cases.values()))
     units = extract_parameter_units(by_id)
 
     unit_symbols = dict(DEFAULT_UNIT_SYMBOLS)
@@ -261,116 +198,15 @@ def generate(args: argparse.Namespace) -> None:
         qudt_unit, symbol = entry.split("=", 1)
         unit_symbols[qudt_unit.strip()] = symbol.strip()
 
-    mapping_file = mapping_path_for(args.metadata_jsonld)
-    mapping = load_mapping(mapping_file) if mapping_file else None
-    software = (mapping or {}).get("software") or build_hints.get("software") or software_name
-    if mapping and software.lower() == "openfoam":
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        snakefile_path = args.output_dir / "Snakefile"
-        snakefile_path.write_text(render_openfoam_snakefile(mapping, build_hints, args, units, unit_symbols),
-                                  encoding="utf-8")
-        print(f"Wrote {snakefile_path} (OpenFOAM, from {mapping_file.name})")
-        for case_id, values in cases.items():
-            case_dir = args.output_dir / case_id
-            case_dir.mkdir(parents=True, exist_ok=True)
-            params_path = case_dir / "parameters.json"
-            params_path.write_text(render_parameters_json(case_id, values, units, unit_symbols), encoding="utf-8")
-            print(f"Wrote {params_path}")
-        mapped = [i["input"] for i in mapping["inputs"] if i.get("expression")]
-        print(
-            f"\n{len(cases)} case(s), {len(mapped)} mapped input(s): {', '.join(mapped)}\n"
-            f"application = {build_hints.get('executable_name') or 'simpleFoam'}\n"
-            f"case run    = {'Allrun' if build_hints.get('has_allrun') else 'blockMesh + application'}"
-            + (f"\nmetrics     = {build_hints['metrics_script']} {build_hints.get('metrics_args', '.')}"
-               if build_hints.get("metrics_script") else "\nmetrics     = (no script found)")
-        )
-        return
-
-    executable = args.executable or derive_executable(build_hints)
-    if not executable:
-        hints_path = args.metadata_jsonld.with_name(args.metadata_jsonld.stem + ".build_hints.json")
-        sys.exit(
-            f"Error: no executable name found in {hints_path} (generate_metadata.py couldn't "
-            "find/parse a CMakeLists.txt declaring it -- or that sidecar file doesn't exist at "
-            "all, e.g. this metadata.jsonld predates that feature) and none was given via "
-            "--executable."
-        )
-
-    build_dir = args.build_dir or derive_build_dir(build_hints, by_id, args.container_shared_dir)
-    if not build_dir:
-        sys.exit(
-            "Error: could not derive a build directory (needs both a codeRepository URL on "
-            "metadata.jsonld's root entity and module_relative_path in the build_hints.json "
-            "sidecar) and none was given via --build-dir."
-        )
-
-    # Union of "Section.Key" flags across all cases, order-preserving. In
-    # practice every case shares the same key set (same scenario-specific
-    # selection was used to build the whole graph); union just guards
-    # against a case that happens to be missing one.
-    flag_keys: list[str] = []
-    seen = set()
-    for values in cases.values():
-        for k in values:
-            if k not in seen:
-                seen.add(k)
-                flag_keys.append(k)
-
-    use_expressions = bool(mapping) and not (args.mesh_split and mapping.get("reference") is None)
-    config_names: dict[str, str] = {}
-    if mapping and not use_expressions:
-        # 1:1 mapping (neutral names) with the flag-based renderer: flags are
-        # the software inputs, parameters.json is read by the neutral name.
-        neutral_to_flag = {}
-        for i in mapping["inputs"]:
-            params = i.get("benchmark_parameters") or []
-            if len(params) == 1:
-                neutral_to_flag[params[0]] = i["input"]
-        flag_keys = [neutral_to_flag.get(k, k) for k in flag_keys]
-        sample_case_values = {neutral_to_flag.get(k, k): v for k, v in sample_case_values.items()}
-        units = {neutral_to_flag.get(k, k): v for k, v in units.items()}
-        config_names = {flag: neutral for neutral, flag in neutral_to_flag.items()}
-
-    if args.mesh_split and not use_expressions and args.inner_radius_flag not in flag_keys:
-        sys.exit(
-            f"Error: --mesh-split needs --inner-radius-flag ({args.inner_radius_flag!r}) to be one of the "
-            f"case-varying parameters, but it's not in: {', '.join(flag_keys)}"
-        )
-    if args.mesh_split and not use_expressions and args.outer_radius_flag and args.outer_radius_flag not in flag_keys:
-        sys.exit(
-            f"Error: --outer-radius-flag ({args.outer_radius_flag!r}) is not one of the case-varying "
-            f"parameters: {', '.join(flag_keys)}. Use --outer-radius for a fixed value instead."
-        )
-    def _is_multi_value(v: Any) -> bool:
-        return (isinstance(v, str) and len(v.split()) > 1) or isinstance(v, list)
-
-    if args.mesh_split and not use_expressions and not _is_multi_value(sample_case_values.get(args.inner_radius_flag)):
-        # Scalar radius value -- r2 has to come from somewhere else.
-        if not args.outer_radius_flag and args.outer_radius is None:
-            sys.exit(
-                f"Error: --inner-radius-flag ({args.inner_radius_flag!r}) is a plain scalar, not a "
-                "--full-value-params multi-token value, so an outer radius can't be derived "
-                "automatically. Pass --outer-radius-flag or --outer-radius, or use "
-                f"--full-value-params in generate_metadata.py to capture "
-                f"{args.inner_radius_flag}'s full multi-token value instead."
-            )
+    result = adapter.render_snakefile(SnakefileContext(
+        args=args, metadata_jsonld=args.metadata_jsonld, by_id=by_id, build_hints=build_hints,
+        cases=cases, units=units, unit_symbols=unit_symbols, mapping=mapping, mapping_file=mapping_file,
+    ))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     snakefile_path = args.output_dir / "Snakefile"
-    if use_expressions:
-        # Inputs set from the mapping's expressions (reference mapping, or a
-        # 1:1 mapping without --mesh-split).
-        if args.mesh_split:
-            print("note: --mesh-split is ignored with --reference-benchmark -- the mapping's expressions "
-                  "already say how the mesh inputs are computed.")
-        text = render_mapped_dumux_snakefile(mapping, executable, build_dir, args, units, unit_symbols)
-    else:
-        # Software input names as flags; with a 1:1 mapping (neutral names),
-        # parameters.json is read by the neutral name of each input.
-        text = render_snakefile(flag_keys, executable, build_dir, args, sample_case_values, units, unit_symbols,
-                                config_names)
-    snakefile_path.write_text(text, encoding="utf-8")
-    print(f"Wrote {snakefile_path}")
+    snakefile_path.write_text(result.text, encoding="utf-8")
+    print(f"Wrote {snakefile_path}{result.note}")
 
     if args.zip:
         args.zip.parent.mkdir(parents=True, exist_ok=True)
@@ -385,17 +221,18 @@ def generate(args: argparse.Namespace) -> None:
         params_path.write_text(render_parameters_json(case_id, values, units, unit_symbols), encoding="utf-8")
         print(f"Wrote {params_path}")
 
-    print(
-        f"\n{len(cases)} case(s), {len(flag_keys)} case-varying flag(s): {', '.join(flag_keys)}\n"
-        f"executable = {executable}\n"
-        f"build_dir  = {build_dir}"
-        + ("  (derived from metadata.jsonld)" if not args.build_dir else "  (from --build-dir)")
-        + (f"\nmesh-split: ON (radial={args.radial_cells_flag}, angular={args.angular_cells_flag}, "
-           f"grading={args.grading_flag}, r1={args.inner_radius_flag}, "
-           f"r2={args.outer_radius_flag or args.outer_radius})" if args.mesh_split else "\nmesh-split: off")
-    )
+    for line in result.summary:
+        print(line)
 
 
+def namespace_for(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    """The Namespace generate() expects, taken from another parser's
+    parsed options (describe_benchmark.py's) -- every option this module
+    and the software adapters define, so callers don't list them."""
+    dests = [a.dest for a in build_arg_parser()._actions if a.dest != "help"]  # noqa: SLF001
+    values = {d: getattr(args, d, None) for d in dests}
+    values.update(overrides)
+    return argparse.Namespace(**values)
 
 
 def main(argv: list[str] | None = None) -> None:

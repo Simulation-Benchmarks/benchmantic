@@ -119,6 +119,7 @@ import config  # noqa: E402
 import metadata.builder as builder  # noqa: E402
 import show_description  # noqa: E402
 import snakefile.generator as generator  # noqa: E402
+import software  # noqa: E402
 from metadata.graph import load_graph  # noqa: E402
 
 REQUIRED_FLAGS = ("module_dir", "container_image", "container_shared_dir")
@@ -256,9 +257,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # --- metadata.builder pass-through ---
     meta = ap.add_argument_group("metadata.builder options")
-    meta.add_argument("--main-cc", type=Path, default=None)
     meta.add_argument("--software", choices=builder.SOFTWARE_CHOICES, default="auto",
-                       help="Simulation software (default: detected from the files).")
+                       help="Simulation software (one per folder in software/; default: detected from the files).")
     builder.add_mapping_args(meta)
     builder.add_semantic_override_args(meta)
     meta.add_argument("--scenario-params", type=str, default=None)
@@ -317,24 +317,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Required, but may instead come from a 'container-image:' key in --config.")
     snake.add_argument("--container-shared-dir", default=None,
                         help="Mount point inside the container used to save results back to the host "
-                             "(e.g. /dumux/shared) -- no universal default, this is tool/container-specific. "
+                             "-- no universal default, this is tool/container-specific. "
                              "Required, but may instead come from a 'container-shared-dir:' key in --config.")
     snake.add_argument("--executable", default=None)
     snake.add_argument("--build-dir", default=None)
     snake.add_argument("--results-subdir", default="results")
-    snake.add_argument("--name-flag", default="Problem.Name")
-    snake.add_argument("--zip-name-flag", default=None)
-    snake.add_argument("--exclude-flag", action="append", default=None)
-    snake.add_argument("--mesh-split", action="store_true",
-                        help="Opt in to the rotating-cylinders-style radial-mesh-splitting math -- see "
-                             "snakefile.generator --help. Only relevant to benchmarks that need it.")
-    snake.add_argument("--radial-cells-flag", default="Grid.Cells0")
-    snake.add_argument("--angular-cells-flag", default="Grid.Cells1")
-    snake.add_argument("--grading-flag", default="Grid.Grading0")
-    snake.add_argument("--inner-radius-flag", default="Grid.Radial0")
-    snake.add_argument("--outer-radius-flag", default=None)
-    snake.add_argument("--outer-radius", type=float, default=None)
     snake.add_argument("--unit-symbol", action="append", default=None)
+
+    # --- each software's own options (software/<name>/), one group each ---
+    software.add_arguments(ap)
+    software.add_snakefile_arguments(ap)
 
     ap.add_argument("-v", "--verbose", action="store_true",
                      help="Show the full underlying build output live, instead of the default short "
@@ -413,7 +405,6 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         clone_dir=args.clone_dir,
         fresh_clone=args.fresh_clone,
         keep_clone=args.keep_clone,
-        main_cc=args.main_cc,
         output=staged_benchmark,
         research_problem_label=args.research_problem_label,
         research_problem_id=args.research_problem_id,
@@ -451,6 +442,7 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",
         outputs=args.outputs,
+        **{dest: getattr(args, dest) for dest in software.argument_dests()},
     )
     # Two sub-steps inside metadata.builder.build() need a real terminal
     # (they call input()), so their output can't be silently captured into
@@ -502,27 +494,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         workdir = output_dir / ".generate_snakefile_workdir"
-        generator_args = argparse.Namespace(
-            metadata_jsonld=staged_benchmark,
-            container_image=args.container_image,
-            container_shared_dir=args.container_shared_dir,
-            software_name=software_name,
-            executable=args.executable,
-            build_dir=args.build_dir,
-            results_subdir=args.results_subdir,
-            name_flag=args.name_flag,
-            zip_name_flag=args.zip_name_flag,
-            exclude_flag=args.exclude_flag,
-            mesh_split=args.mesh_split,
-            radial_cells_flag=args.radial_cells_flag,
-            angular_cells_flag=args.angular_cells_flag,
-            grading_flag=args.grading_flag,
-            inner_radius_flag=args.inner_radius_flag,
-            outer_radius_flag=args.outer_radius_flag,
-            outer_radius=args.outer_radius,
-            unit_symbol=args.unit_symbol,
-            output_dir=workdir,
-            zip=None,
+        generator_args = generator.namespace_for(
+            args, metadata_jsonld=staged_benchmark, software_name=software_name, output_dir=workdir, zip=None,
         )
         run_step("Generating Snakefile", args.verbose or args.debug, generator.generate, generator_args)
         snakefile_path = output_dir / "Snakefile"
@@ -598,27 +571,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
     snakefile_path: Path | None = None
     if outputs.get("snakefile", True):
         workdir = output_dir / ".generate_snakefile_workdir"
-        generator_args = argparse.Namespace(
-            metadata_jsonld=benchmark_path,
-            container_image=args.container_image,
-            container_shared_dir=args.container_shared_dir,
-            software_name=software_name,
-            executable=args.executable,
-            build_dir=args.build_dir,
-            results_subdir=args.results_subdir,
-            name_flag=args.name_flag,
-            zip_name_flag=args.zip_name_flag,
-            exclude_flag=args.exclude_flag,
-            mesh_split=args.mesh_split,
-            radial_cells_flag=args.radial_cells_flag,
-            angular_cells_flag=args.angular_cells_flag,
-            grading_flag=args.grading_flag,
-            inner_radius_flag=args.inner_radius_flag,
-            outer_radius_flag=args.outer_radius_flag,
-            outer_radius=args.outer_radius,
-            unit_symbol=args.unit_symbol,
-            output_dir=workdir,
-            zip=None,
+        generator_args = generator.namespace_for(
+            args, metadata_jsonld=benchmark_path, software_name=software_name, output_dir=workdir, zip=None,
         )
         run_step("Generating Snakefile", args.verbose or args.debug, generator.generate, generator_args)
 

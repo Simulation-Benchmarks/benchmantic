@@ -205,10 +205,6 @@ def load_mapping(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def input_display(section: str, key: str, software: str) -> str:
-    return f"{section}.{key}" if software.lower().startswith("dumu") else f"{section}:{key}"
-
-
 def identity_expression(name: str, template_value: str, index: int | None, full_value: bool) -> str:
     """The expression for a 1:1 input (no reference benchmark): the input
     takes the benchmark parameter's value. For a multi-token input where

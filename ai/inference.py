@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from metadata.parameters import ParameterCandidate
 
 from ai.prompts import (
-    METRIC_SYSTEM_PROMPT, SYSTEM_PROMPT, build_metric_prompt, build_prompt,
+    build_metric_prompt, build_prompt, metric_system_prompt, parameter_system_prompt,
 )
 from ai.validation import extract_json_array, validate_metadata, validate_metric_metadata
 
@@ -1185,9 +1185,10 @@ def _batches(items: list, size: int) -> list[list]:
 
 def infer_parameter_metadata(
     candidates: list[ParameterCandidate],
-    main_cc: str,
-    problem_hh: str,
+    source_text: str,
     *,
+    software_name: str = "",
+    software_context: str = "",
     benchmark_description: str = "",
     provider: str = DEFAULT_PROVIDER,
     model: str | None = None,
@@ -1227,15 +1228,17 @@ def infer_parameter_metadata(
     results: list[dict] = []
 
     def build(batch: list[ParameterCandidate]) -> str:
-        return build_prompt(batch, main_cc, problem_hh, benchmark_description, known_corrections)
+        return build_prompt(batch, source_text, benchmark_description, known_corrections)
+
+    system_prompt = parameter_system_prompt(software_name, software_context)
 
     for batch in _batches(candidates, batch_size):
-        for sub_batch in _split_by_token_budget(batch, build, SYSTEM_PROMPT, tpm_budget, "parameter"):
+        for sub_batch in _split_by_token_budget(batch, build, system_prompt, tpm_budget, "parameter"):
             prompt = build(sub_batch)
             results.extend(_query_llm_json_array(
                 provider=provider,
                 model=model,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 prompt=prompt,
                 item_count=len(sub_batch),
                 item_label="parameter",
@@ -1252,9 +1255,10 @@ def infer_parameter_metadata(
 
 def infer_metric_metadata(
     candidates: list[MetricCandidate],
-    main_cc: str,
-    problem_hh: str,
+    source_text: str,
     *,
+    software_name: str = "",
+    software_context: str = "",
     benchmark_description: str = "",
     provider: str = DEFAULT_PROVIDER,
     model: str | None = None,
@@ -1278,15 +1282,17 @@ def infer_metric_metadata(
     results: list[dict] = []
 
     def build(batch: list[MetricCandidate]) -> str:
-        return build_metric_prompt(batch, main_cc, problem_hh, benchmark_description, known_corrections)
+        return build_metric_prompt(batch, source_text, benchmark_description, known_corrections)
+
+    system_prompt = metric_system_prompt(software_name)
 
     for batch in _batches(candidates, batch_size):
-        for sub_batch in _split_by_token_budget(batch, build, METRIC_SYSTEM_PROMPT, tpm_budget, "metric"):
+        for sub_batch in _split_by_token_budget(batch, build, system_prompt, tpm_budget, "metric"):
             prompt = build(sub_batch)
             results.extend(_query_llm_json_array(
                 provider=provider,
                 model=model,
-                system_prompt=METRIC_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 prompt=prompt,
                 item_count=len(sub_batch),
                 item_label="metric",
@@ -1299,5 +1305,3 @@ def infer_metric_metadata(
                 allow_model_fallback=allow_model_fallback,
             ))
     return results
-
-

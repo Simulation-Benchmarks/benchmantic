@@ -82,9 +82,10 @@ To fix a value after the fact (e.g. a `--skip-review` run, or something spotted 
 - `workflow.py` — runs the scripts above as one CI-friendly pipeline.
 - `config.py` — optional `--config` YAML support, shared by `workflow.py` and `describe_benchmark.py`.
 - `utils.py` — shared string/number/file helpers.
-- `metadata/` — `builder.py`, `adapters/` (one per simulation code: DuMux, OpenFOAM), `foam_dict.py` (OpenFOAM dictionary reader), `mapping.py` (benchmark parameters -> software inputs), `reference.py` (reads `--reference-benchmark`), `graph.py`, `repo_source.py` (resolves `module_dir`: local path, or clone/update a git URL), `repository.py`, `parameters.py`, `metrics.py`, `publication.py`, `software.py` — benchmark.jsonld generation.
+- `metadata/` — `builder.py`, `mapping.py` (benchmark parameters -> software inputs), `reference.py` (reads `--reference-benchmark`), `graph.py`, `repo_source.py` (resolves `module_dir`: local path, or clone/update a git URL), `repository.py`, `parameters.py`, `metrics.py`, `publication.py` — software-neutral benchmark.jsonld generation.
 - `ai/` — `prompts.py`, `mapping.py` (input-mapping inference), `inference.py`, `validation.py`, `review.py` (combined review/edit step, run between inference and graph-build; plain-text UI + the shared field-edit logic), `tui.py` (optional curses UI for the parameter selector, the review queue, and the Outputs-step picker, falls back to `review.py`/`metadata.builder`'s plain-text prompts automatically), `cache.py` (inference caching plus the Outputs-step selection persisted to `.benchmantic_outputs.json`), `corrections.py` — LLM-based semantic metadata inference and its cross-benchmark corrections memory.
 - `snakefile/` — `generator.py`, `renderer.py` — executable-workflow generation.
+- `software/` — one folder per simulation code (`dumux/`, `openfoam/`; `_template/` to add one): the adapter (inputs, metrics, cases), its Snakefile template, its LLM notes (`prompt.md`) and its own CLI options. The only software-specific code; a new folder is registered automatically.
 
 ## Common edge cases
 
