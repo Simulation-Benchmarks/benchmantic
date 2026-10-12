@@ -57,8 +57,10 @@ workflow.py runs all of the above in one command
 ```bash
 git clone https://github.com/Simulation-Benchmarks/benchmantic.git
 cd benchmantic
-pip install groq rdflib
+pip install groq rdflib pyyaml
 ```
+
+`pyyaml` reads the per-software config files (`software/<name>/software.yaml`).
 
 `groq` is the default LLM provider (free tier). To use OpenAI instead, install `openai` and pass `--provider openai` (with `--model`, if you want something other than its default) to `describe_benchmark.py`/`workflow.py`:
 
@@ -78,12 +80,6 @@ Optionally, install [`roc-validator`](https://github.com/crs4/rocrate-validator)
 
 ```bash
 pip install roc-validator
-```
-
-`--config` (see the Config files section below) additionally needs `pyyaml`, only if you actually use that flag:
-
-```bash
-pip install pyyaml
 ```
 
 ## Requirements
@@ -162,7 +158,7 @@ The software is detected from the files (override with `--software dumux|openfoa
 | DuMux | `main.cc` + `problem.hh` | `params.input` entries, with `getParam<T>()` call sites as context | JSON keys written in `main.cc` |
 | OpenFOAM | a case with `system/controlDict`, or a zip containing one (e.g. `output_template.zip`, unpacked to `<module>/.benchmantic/`) | dictionary entries (`constant/MRFProperties` / `MRF1/omega`), with how each is used in the file as context; template placeholders `{name}` are pre-selected | keys of the dict a Python script `json.dump`s to `solution_metrics.json` |
 
-Each simulation code is one folder under `software/` -- see [Adding a simulation code](#adding-a-simulation-code).
+Each simulation code is one folder under `software/` holding a `software.yaml` -- see [Adding a simulation code](#adding-a-simulation-code).
 
 **Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:
 
@@ -233,7 +229,7 @@ benchmantic/
 │   ├── mardi.py               #   MaRDI portal lookup (research problem / mathematical model)
 │   └── publication.py         #   literature citation extraction
 ├── ai/                        # LLM-based semantic metadata inference
-│   ├── prompts.py              #   prompt templates (software name + its prompt.md filled in per run)
+│   ├── prompts.py              #   prompt templates (software name + its llm_notes filled in per run)
 │   ├── mapping.py              #   LLM proposal of input -> benchmark-parameter expressions
 │   ├── inference.py            #   provider config + request/retry loop
 │   ├── validation.py           #   response validation and repair
@@ -243,48 +239,49 @@ benchmantic/
 │   └── corrections.py           #   cross-benchmark human-correction memory
 ├── snakefile/                  # executable-workflow generation
 │   ├── generator.py             #   reads benchmark.jsonld, asks the software for its Snakefile, writes it
-│   └── renderer.py               #   shared pieces: parameters.json keys, parameter assignments
-├── software/                   # one folder per simulation code -- the only software-specific code
-│   ├── __init__.py              #   registry: every sub-folder exporting `Adapter` is picked up
-│   ├── base.py                  #   SoftwareAdapter: the contract each code implements
-│   ├── _template/               #   copy this to add a code
+│   ├── renderer.py              #   shared pieces: parameters.json keys, parameter assignments
+│   └── styles/                  #   how a case is run: command_line (DuMux), case_files (OpenFOAM)
+├── software/                   # the supported simulation codes
+│   ├── generic.py               #   the one engine that reads a software.yaml and does every step
+│   ├── sources.py               #   shared ways to read sources (C++ class, Doxygen, README, CMake, ...)
+│   ├── formats/                 #   input file readers: ini (DuMux), foam_dict (OpenFOAM)
+│   ├── base.py                  #   the interface the pipeline calls
+│   ├── _template/software.yaml  #   copy this to add a code
 │   ├── dumux/
-│   │   ├── adapter.py           #     DuMux adapter (main.cc + problem.hh module)
-│   │   ├── inputs.py            #     params.input reader, getParam<T>() hints, case values
-│   │   ├── sources.py           #     module search, CMake target, Doxygen text, cases, main.cc metrics
-│   │   ├── snakefile.py         #     -Section.Key flag Snakefiles, --mesh-split, DuMux options
-│   │   └── prompt.md            #     notes for the LLM
+│   │   ├── software.yaml        #     the basic details of DuMux
+│   │   └── hooks.py             #     extra: the older flag-based Snakefile with --mesh-split
 │   └── openfoam/
-│       ├── adapter.py           #     OpenFOAM adapter (case dictionaries, zipped templates, metrics script)
-│       ├── foam_dict.py         #     dictionary reader
-│       ├── snakefile.py         #     placeholder/foamDictionary Snakefiles
-│       └── prompt.md            #     notes for the LLM
-└── tests/                      # adapter checks against tests/fixtures/<software>/
+│       └── software.yaml        #     the basic details of OpenFOAM
+└── tests/                      # each software checked against a small example in tests/fixtures/<software>/
 ```
 
 ## Adding a simulation code
 
-All software-specific code lives in `software/<name>/`; the pipeline steps
-(discover → select → infer & review → generate → validate) are the same for
-every code and only call the adapter. To add, say, FEniCS:
+The pipeline steps (discover → select → infer & review → generate →
+validate) are the same for every code. What differs is described in one
+config file, `software/<name>/software.yaml`. To add a code:
 
-1. Copy `software/_template/` to `software/fenics/`. The folder name is the
-   `--software` value, and the registry picks the folder up by itself --
-   nothing else in the repository needs to change.
-2. In `adapter.py`, implement discovery: `detect`, `find_module_dir`,
-   `discover_parameters`, `discover_metrics`, `discover_cases`,
-   `resolve_case_params` (see `software/base.py`; DuMux and OpenFOAM are two
-   complete examples). Shared helpers such as
-   `metadata.metrics.discover_metrics_in_python` (metric keys of a dict
-   dumped to `solution_metrics.json`) can be reused.
-3. In `snakefile.py`, write how one case is run; in `prompt.md`, tell the LLM
-   what an input's `(section, key)` pair means and which names imply units.
-   Options only this code needs go in `add_arguments` /
-   `add_snakefile_arguments`; they appear under their own heading in `--help`.
-4. Add a small example to `tests/fixtures/fenics/` and run
-   `python3 -m pytest tests` -- every adapter is checked against its example
-   (recognised by itself only, parameters/metrics/cases found, case values
-   resolved, prompt notes and Snakefile present).
+1. Copy `software/_template/` to `software/<name>/`. The folder name is the
+   `--software` value; the folder is picked up by itself.
+2. Fill in `software.yaml`. It says:
+   - which files mark the implementation, and which file marks a case;
+   - the input file format (`ini`, `foam_dict`) and which inputs to pre-select;
+   - which files the metrics come from;
+   - where the benchmark's name and description come from (README, C++ class, Doxygen);
+   - how a case is run: the Snakefile style (`command_line`: an executable
+     with every input as a flag; `case_files`: inputs written into a case
+     folder, then a run script) with its command;
+   - `llm_notes`: what an input's name means for this code, for the LLM.
+
+   `software/dumux/software.yaml` and `software/openfoam/software.yaml` are
+   two complete examples; the template explains every key.
+3. Optionally add a small example to `tests/fixtures/<name>/` and run
+   `python3 -m pytest tests`.
+
+Python is only needed when a code uses an input file format not yet
+supported (add a reader to `software/formats/`, reusable by every later
+code), or does something no setting covers (a `hooks.py` next to the
+config, as DuMux has for `--mesh-split`).
 
 ## License
 

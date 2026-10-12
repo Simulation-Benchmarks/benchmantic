@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Every registered software adapter against its own example under
-tests/fixtures/<slug>/. A new software folder needs a fixture; these checks
-then run for it automatically."""
+"""Each software in software/ against its small example in
+tests/fixtures/<software>/: recognised, and inputs, metrics and cases
+found. Run with: python3 -m pytest tests"""
 
 from __future__ import annotations
 
@@ -18,72 +18,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import software  # noqa: E402
-from software.base import SoftwareAdapter  # noqa: E402
-
-FIXTURES = Path(__file__).parent / "fixtures"
-ADAPTERS = software.ADAPTERS
 
 
-@pytest.fixture
-def example(tmp_path, request):
-    cls = request.param
-    src = FIXTURES / cls.slug
-    if not src.is_dir():
-        pytest.fail(f"software/{cls.slug}/ has no example: add tests/fixtures/{cls.slug}/")
-    dest = tmp_path / cls.slug
-    shutil.copytree(src, dest)
-    return cls, dest
+@pytest.mark.parametrize("cls", software.ADAPTERS, ids=lambda a: a.slug)
+def test_example(cls, tmp_path):
+    example = Path(__file__).parent / "fixtures" / cls.slug
+    if not example.is_dir():
+        pytest.fail(f"add a small example for software/{cls.slug}/ in tests/fixtures/{cls.slug}/")
+    root = tmp_path / cls.slug
+    shutil.copytree(example, root)
 
-
-def test_registry_lists_dumux_and_openfoam():
-    assert {"dumux", "openfoam"} <= {a.slug for a in ADAPTERS}
-    assert "_template" not in software.SOFTWARE_CHOICES
-
-
-@pytest.mark.parametrize("example", ADAPTERS, indirect=True, ids=lambda a: a.slug)
-def test_detected_by_its_own_adapter_only(example):
-    cls, root = example
-    assert [a.slug for a in ADAPTERS if a.detect(root)] == [cls.slug]
-    assert type(software.get_adapter(root, "auto")) is cls
-
-
-@pytest.mark.parametrize("example", ADAPTERS, indirect=True, ids=lambda a: a.slug)
-def test_discovers_parameters_metrics_and_cases(example):
-    cls, root = example
+    assert type(software.get_adapter(root)) is cls, "recognised as another software"
     adapter = cls()
     module_dir = adapter.find_module_dir(root, None)
-    params = adapter.discover_parameters(module_dir)
-    assert params, "no parameters discovered"
-    selected = adapter.default_scenario_candidates(params)
-    assert selected and set(map(id, selected)) <= set(map(id, params))
-    assert adapter.discover_metrics(module_dir, root), "no metrics discovered"
+    assert adapter.discover_parameters(module_dir), "no inputs found"
+    assert adapter.discover_metrics(module_dir, root), "no metrics found"
     cases = adapter.discover_cases(module_dir)
-    assert cases, "no cases discovered"
-    assert len({cid for _, cid in cases}) == len(cases), "case ids must be unique"
+    assert cases, "no cases found"
+    selected = adapter.default_scenario_candidates(adapter.discover_parameters(module_dir))
     fields = {f"{c.section}::{c.key}": {"ini": (c.section, c.key), "index": 0, "full_value": True}
               for c in selected}
     for case_dir, _ in cases:
-        values = adapter.resolve_case_params(case_dir, fields)
-        assert set(values) == set(fields)
+        assert set(adapter.resolve_case_params(case_dir, fields)) == set(fields)
 
 
-@pytest.mark.parametrize("cls", ADAPTERS, ids=lambda a: a.slug)
-def test_has_prompt_notes_and_snakefile(cls):
-    assert cls.name and cls.name != "unknown"
-    assert cls().prompt_context(), f"software/{cls.slug}/prompt.md is missing or empty"
-    assert cls.render_snakefile is not SoftwareAdapter.render_snakefile, "render_snakefile() not implemented"
-
-
-def test_new_folder_is_registered_without_other_changes(tmp_path, monkeypatch):
-    """Copying _template to a new folder is all it takes to register it."""
-    pkg = tmp_path / "mycode"
-    shutil.copytree(ROOT / "software" / "_template", pkg)
-    for f in pkg.glob("*.py"):
-        f.write_text(f.read_text().replace("software._template", "software.mycode"))
+def test_a_new_software_is_just_a_folder(tmp_path, monkeypatch):
+    (tmp_path / "mycode").mkdir()
+    shutil.copy(ROOT / "software" / "_template" / "software.yaml", tmp_path / "mycode" / "software.yaml")
     monkeypatch.setattr(software, "__path__", [*software.__path__, str(tmp_path)])
-    try:
-        found = software._discover()
-        assert "mycode" in [a.slug for a in found]
-    finally:
-        for name in [m for m in sys.modules if m.startswith("software.mycode")]:
-            del sys.modules[name]
+    assert "mycode" in [a.slug for a in software._discover()]

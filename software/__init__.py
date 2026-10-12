@@ -5,10 +5,17 @@
 """
 software
 
-One folder per supported simulation code. Every sub-package whose
-__init__.py exports `Adapter` (a software.base.SoftwareAdapter subclass) is
-registered automatically -- adding a code means adding a folder, nothing
-else. Folders starting with "_" (e.g. _template) are skipped.
+One folder per supported simulation code, registered automatically --
+adding a code means adding a folder, nothing else:
+
+  software/<name>/software.yaml   the usual case: the basic details of the
+                                  code, read by software.generic
+  software/<name>/__init__.py     only for a code no config can describe:
+                                  exports `Adapter`, a SoftwareAdapter
+                                  subclass written in Python
+
+Folders starting with "_" (e.g. _template) are skipped, and so are the
+shared packages here (formats/).
 
 `get_adapter(root, name)` returns the adapter named by --software, or
 auto-detects one from the files under `root`. `adapter_for_label(label)`
@@ -19,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import pkgutil
 import sys
 from pathlib import Path
 
@@ -33,16 +39,26 @@ __all__ = [
 
 
 def _discover() -> list[type[SoftwareAdapter]]:
+    from software.generic import GenericAdapter
+
     found: list[type[SoftwareAdapter]] = []
-    for info in sorted(pkgutil.iter_modules(__path__), key=lambda m: m.name):
-        if not info.ispkg or info.name.startswith("_"):
+    folders = sorted({d for base in __path__ for d in Path(base).iterdir() if d.is_dir()}, key=lambda d: d.name)
+    for folder in folders:
+        if folder.name.startswith(("_", ".")):
             continue
-        module = importlib.import_module(f"{__name__}.{info.name}")
+        if (folder / "software.yaml").is_file():
+            found.append(GenericAdapter.for_folder(folder))
+            continue
+        if not (folder / "__init__.py").is_file():
+            continue
+        module = importlib.import_module(f"{__name__}.{folder.name}")
         cls = getattr(module, "Adapter", None)
+        if cls is None:
+            continue  # a shared package such as formats/, not a software
         if not (isinstance(cls, type) and issubclass(cls, SoftwareAdapter)):
-            raise ImportError(f"software/{info.name}/__init__.py must export `Adapter`, "
-                              "a subclass of software.base.SoftwareAdapter")
-        cls.slug = cls.slug or info.name
+            raise ImportError(f"software/{folder.name}/__init__.py: `Adapter` must be a subclass of "
+                              "software.base.SoftwareAdapter")
+        cls.slug = cls.slug or folder.name
         found.append(cls)
     return found
 
@@ -84,7 +100,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_snakefile_arguments(parser: argparse.ArgumentParser) -> None:
-    """Each software's own Snakefile options, one group per software."""
+    """Snakefile options: once per Snakefile style in use (styles are
+    shared between codes), then each software's own extras."""
+    styles: dict[str, list[str]] = {}
+    for cls in ADAPTERS:
+        style = getattr(cls, "style", None)
+        if style is not None:
+            styles.setdefault(style().__name__.rsplit(".", 1)[-1], []).append(cls.name)
+    for style_name, users in styles.items():
+        from snakefile.styles import get_style
+        get_style(style_name).add_arguments(
+            parser.add_argument_group(f"Snakefile options, {style_name} style ({', '.join(users)})"))
     for cls in ADAPTERS:
         cls.add_snakefile_arguments(parser.add_argument_group(f"{cls.name} Snakefile options"))
 

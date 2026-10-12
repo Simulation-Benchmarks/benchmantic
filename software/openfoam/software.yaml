@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# OpenFOAM: case folders (system/controlDict, constant/, 0/) -- given
+# directly, or zipped next to the benchmark's scripts (e.g.
+# rotating-cylinders/openfoam/output_template.zip). Inputs are dictionary
+# entries; template placeholders such as "omega {omega};" are the inputs a
+# benchmark sets per run. Metrics are the keys a post-processing script
+# writes to solution_metrics.json.
+
+name: OpenFOAM
+input_label: the OpenFOAM case dictionaries
+display: "{section}:{key}"           # constant/MRFProperties:MRF1/omega
+
+# no `implementation.files`: the benchmark is the folder holding the cases
+
+cases:
+  marker: system/controlDict         # a folder with this file is one case
+  nested: false
+  ids: folder_name
+  zips: true                         # also cases inside *.zip (unpacked to .benchmantic/)
+
+sources:                             # read for license, name and description
+  input_files_named: [controlDict, transportProperties, physicalProperties, MRFProperties]
+
+inputs:
+  format: foam_dict
+  folders: [system, constant, "0", "0.orig"]
+  default_selection:                 # pre-selected as case-varying
+    placeholders_first: true
+    sections: ["constant/*", "system/blockMeshDict*"]
+    numeric_only: true
+    label: template placeholders and physical-property entries
+
+metrics:
+  files: ["*.py", "*.sh", "Allrun*"]
+  subfolders: true
+  parent_folder: true
+  must_mention: solution_metrics.json
+
+label: markdown_title                # "# Rotating Cylinders Benchmark (...)" -> rotating cylinders
+description: markdown_section        # the docs' "Problem description" section
+executable:
+  from: entry
+  file: system/controlDict
+  key: application
+
+snakefile:
+  style: case_files
+  run_script: Allrun
+  run: "chmod +x Allrun && ./Allrun"
+  run_without_script: "blockMesh > log.blockMesh 2>&1 && {application} > log.{application} 2>&1"
+  default_application: simpleFoam
+  set_entry: 'foamDictionary -entry "{key}" -set "{value}" {section}'
+  environment: |
+    set +u
+    for rc in /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc; do
+        if [ -f "$rc" ]; then . "$rc"; break; fi
+    done
+    set -u
+  metrics_args: "--single-case ."
+  metrics_args_fallback: "."
+
+llm_notes: |
+  Parameters are entries of OpenFOAM case dictionaries: "ini": [section, key]
+  is the dictionary file relative to the case (e.g. "constant/MRFProperties")
+  and the entry path inside it (e.g. "MRF1/omega").
+
+  "cpp_hint" names the dictionary and entry the value lives in; "code_context"
+  shows the entry and the lines that use it. In OpenFOAM, `nu` is a kinematic
+  viscosity (m2/s) and an MRF `omega` an angular velocity (rad/s).

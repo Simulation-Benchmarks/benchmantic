@@ -6,7 +6,7 @@ SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = ["README.md", "SKILL.md", "software/**/prompt.md"]
+path = ["README.md", "SKILL.md"]
 SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
 SPDX-License-Identifier = "MIT"
 

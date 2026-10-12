@@ -1,3 +1,3 @@
-cmake_minimum_required(VERSION 3.16)
-project(rotating-cylinders CXX)
-add_subdirectory(test)
+dumux_add_test(NAME test_ff_rotatingcylinders
+               SOURCES main.cc
+               LABELS freeflow)

@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# Template for a new simulation code. Copy this folder to software/<name>/
+# -- the folder name becomes the --software value --
+# and fill in the values below. Nothing else in the repository has to
+# change. software/dumux/ and software/openfoam/ are two complete examples.
+# Folders starting with "_" (like this one) are not loaded.
+
+name: MyCode                         # the software's name, written to the description
+input_label: the MyCode input file   # how the inputs are called in messages
+display: "{section}:{key}"           # how one input is written for people
+
+# The folder holding the benchmark implementation. Either list files that
+# sit side by side in it (pick_option adds --<option> to choose one if
+# several such folders exist) ...
+implementation:
+  files: [main.py]
+# ... or leave `implementation` out: the benchmark is then the folder
+# holding the cases (as for OpenFOAM).
+
+cases:
+  marker: parameters.ini             # a folder with this file is one case
+  nested: true                       # cases may sit inside another case
+  ids: path                          # path: cases/fine -> cases_fine | folder_name: fine
+  zips: false                        # also look for cases inside *.zip
+
+# Files read for license (SPDX headers), name and description, relative to
+# the implementation folder; or {input_files_named: [...]} to use some of
+# the input files instead.
+sources: [main.py]
+
+inputs:
+  format: ini                        # a reader in software/formats/: ini | foam_dict
+  files: [parameters.ini]            # ini: the input file(s) of a case
+  # folders: [system, constant, "0"] # foam_dict: case sub-folders with inputs
+  default_selection:                 # pre-selected as case-varying (step 2)
+    sections: ["*"]                  # section names or patterns
+    # placeholders_first: true       # prefer inputs written as "{name}"
+    # numeric_only: true
+    label: all parameters
+  # code_hints:                      # optional: where the code reads an input
+  #   files: [main.py]
+  #   pattern: 'params\["(?P<key>[^"]+)"\]'   # a `key` group is required;
+  #   key_format: "{section}.{key}"           # `var`/`type` groups are optional
+  #   hint: "read into `{var}`"
+  #   hint_without_var: "read here"
+
+metrics:
+  files: ["*.py"]                    # file name patterns ...
+  subfolders: true                   # ... also in sub-folders
+  parent_folder: false               # ... also in the folder above
+  must_mention: solution_metrics.json  # only files that write the metrics file
+
+label: markdown_title                # markdown_title (README "# Title") | cpp_class
+description: markdown_section        # markdown_section (README section) | doxygen
+executable:
+  from: none                         # cmake | entry (a value in an input file) | none
+  # file: system/controlDict         # entry: the file in the case ...
+  # key: application                 # ... and the entry holding the executable
+  # test_macros: [dumux_add_test]    # cmake: macros declaring a target, and
+  # source: main.cc                  # the source that marks the right one
+
+snakefile:
+  style: command_line                # command_line | case_files (see snakefile/styles/)
+  build_dir: "{container_root}/{repository}/{module_path}"
+  command: "python3 main.py"
+  input_flag: '--{input} "{value}"'
+  # name_input: Output.Name          # the input naming the run's output
+
+llm_notes: |
+  TODO: tell the LLM what a parameter's "ini": [section, key] pair is for
+  this code (e.g. the input file section and the entry name), what
+  "cpp_hint" and "code_context" contain, and naming conventions that imply
+  units (e.g. `nu` is a kinematic viscosity in m2/s).

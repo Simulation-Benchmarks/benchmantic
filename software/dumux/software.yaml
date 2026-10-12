@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# DuMux / DUNE: a module folder with main.cc + problem.hh, inputs in a DUNE
+# INI file (params.input), metrics written by main.cc as JSON, one
+# params.input per case, a CMake target run with -Section.Key flags.
+# hooks.py adds the older flag-based Snakefile with --mesh-split.
+
+name: DuMux
+input_label: params.input            # how the inputs are called in messages
+display: "{section}.{key}"           # how one input is written: Grid.Cells0
+
+implementation:                      # the folder holding the benchmark
+  files: [main.cc, problem.hh]       # ... has all of these
+  pick_option: main-cc               # --main-cc picks one if several are found
+
+cases:
+  marker: params.input               # a folder with this file is one case
+  nested: true                       # cases may sit inside another case
+  ids: path                          # cases/fine -> case id "cases_fine"
+
+sources: [problem.hh, main.cc]       # read for license, name and description
+
+inputs:
+  format: ini
+  files: [params.input]
+  default_selection:                 # pre-selected as case-varying
+    sections: [domain, grid, problem]
+    label: "parameters under [domain, grid, problem]"
+  code_hints:                        # where the code reads an input
+    files: [main.cc, problem.hh]
+    pattern: '(?:(?P<var>\w+)\s*=\s*)?getParam(?:FromGroup)?\s*<(?P<type>.+?)>\s*\(\s*(?:"[^"]*"\s*,\s*)?"(?P<key>[^"]+)"'
+    key_format: "{section}.{key}"
+    hint: "assigned to variable `{var}` (C++ type `{type}`)"
+    hint_without_var: "read with C++ type `{type}`"
+
+metrics:
+  files: [main.cc]                   # its "key": value JSON output
+
+label: cpp_class                     # RotatingCylindersProblem -> rotating cylinders problem
+description: doxygen                 # the longest /*! ... */ comment
+executable:
+  from: cmake
+  test_macros: [dumux_add_test, dune_add_test]
+  source: main.cc
+
+snakefile:
+  style: command_line
+  container_shared_dir: /dumux/shared
+  build_dir: "{container_root}/{repository}/build-cmake/{module_path}"
+  command: "./{executable}"
+  input_flag: '-{input} "{value}"'
+  name_input: Problem.Name
+
+llm_notes: |
+  Parameters are entries of a DUNE/DuMux params.input INI file: "ini":
+  [section, key] is the INI [Section] and the key (e.g. ["Grid", "Radial0"]).
+
+  "cpp_hint" is the getParam<Type>("Section.Key") call site in the C++ source
+  (e.g. the exact C++ variable name and type it is assigned to, such as
+  `density_` of type `Scalar`); "code_context" is the C++ source around that
+  call site. Variable names imply units: `density_`/`rho_` implies kg/m3, a
+  variable read as `omega_`/an angular velocity implies rad/s, `viscosity_`
+  (dynamic) implies Pa*s, `radius_`/`length_` implies m.
