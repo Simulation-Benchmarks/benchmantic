@@ -5,35 +5,28 @@
 """
 config.py
 
-Optional YAML config-file support for describe_benchmark.py and
-workflow.py, so a benchmark's usual flag set doesn't have to be retyped on
-every invocation. Pass --config <path.yaml>; a flag also given explicitly
-on the command line always overrides the same key in the file -- the file
-only supplies defaults for whatever wasn't typed that time.
+The run config: a YAML file passed with --config to workflow.py or
+describe_benchmark.py, so a benchmark's settings don't have to be retyped.
+A value also given on the command line wins over the file.
 
-File format: a flat YAML mapping from flag name (leading "--" optional,
-dashes or underscores both accepted) to its value, e.g.:
+Format -- a few plain keys, the same for every software (anything that
+depends on the software is in its software description instead):
 
-    module_dir: /Users/sarbani/NFDI_Benchmark/dumux_test/rotating-cylinders
-    full-value-params: Radial0
-    container-image: git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1
-    container-shared-dir: /dumux/shared
-    mesh-split: true
-    zip-name-flag: Problem.Name
-    semantic-benchmark-src: ../semantic-benchmark
-    verbose: true
-    review-confidence-threshold: 0.99
-    clear-cache: true
+    implementation: /path/to/rotating-cylinders     # your code (folder or git URL)
+    software: DuMux                                 # the simulation software's name
+    container: registry.example.org/rotating-cylinders:3.1   # image it runs in
+    reference: /path/to/benchmark/1.0.0/minimal-configurations.json   # optional
+    llm_model: openai/gpt-oss-120b                  # optional
+    review_below_confidence: 0.99                   # optional
+    verbose: true                                   # optional
 
-Any flag either script accepts can go in the file, including the
-"required" ones (module_dir, --container-image, --container-shared-dir) --
-those three are the only ones actually enforced as required, and only
-after the config file has had a chance to supply them (see
-check_required()).
+See run-config-template.yaml for every key. Any command-line option also
+works as a key, by its name (leading "--" optional, dashes or underscores
+both accepted) -- that is how older files are written.
 
 Two caveats, both inherent to how argparse merges an explicit CLI value
 with a default rather than anything special to this file:
-  - A store_true flag (mesh-split, verbose, clear-cache, skip-review, ...)
+  - A store_true flag (verbose, clear-cache, skip-review, ...)
     set to `true` in the config can't be forced back to `false` from the
     command line for one run -- there's no CLI syntax for "explicitly
     off" on a store_true flag. Remove it from the config for that run
@@ -50,6 +43,40 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Any
+
+#: Plain run-config keys -> the command-line option (argparse dest) they set.
+PLAIN_KEYS: dict[str, str] = {
+    "implementation": "module_dir",
+    "software": "software",
+    "container": "container_image",
+    "reference": "reference_benchmark",
+    "llm_model": "model",
+    "llm_provider": "provider",
+    "review_below_confidence": "review_confidence_threshold",
+    "verbose": "verbose",
+    "software_description": "software_description",
+    "save_software_description": "save_software_description",
+}
+#: Options only workflow.py has (its later steps); describe_benchmark.py
+#: skips them, so one run config works for both.
+WORKFLOW_ONLY = {"semantic_benchmark_src", "show_output", "skip_show", "skip_check"}
+#: The plain key to name in messages about a missing option.
+PLAIN_NAME = {dest: key for key, dest in PLAIN_KEYS.items()}
+
+
+def translate(data: dict[str, Any], source: Path) -> dict[str, Any]:
+    """Run-config keys -> {argparse dest: value}."""
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        key = str(key).lstrip("-").replace("-", "_")
+        if key == "reference" and str(value).lower() in ("none", "no", "false"):
+            out["no_reference"] = True
+            continue
+        dest = PLAIN_KEYS.get(key, key)
+        if dest in out and out[dest] != value:
+            sys.exit(f"Error: {source}: {key} sets something already set by another key.")
+        out[dest] = value
+    return out
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -79,7 +106,7 @@ def load_config_file(path: Path) -> dict[str, Any]:
             f"Error: {path} must contain a YAML mapping (key: value pairs), "
             f"not a {type(data).__name__}."
         )
-    return {str(k).lstrip("-").replace("-", "_"): v for k, v in data.items()}
+    return translate(data, path)
 
 
 def known_dests(*parsers: argparse.ArgumentParser) -> set[str]:
@@ -107,8 +134,9 @@ def apply_config(config: dict[str, Any], *parsers: argparse.ArgumentParser, sour
     unknown = set(config) - known_dests(*parsers)
     if unknown:
         sys.exit(
-            f"Error: {source}: unknown config key(s): {', '.join(sorted(unknown))}. "
-            f"Run the relevant script with --help to see the accepted flag names."
+            f"Error: {source}: unknown key(s): {', '.join(sorted(unknown))}. The keys are "
+            f"{', '.join(PLAIN_KEYS)} (see run-config-template.yaml); any command-line option also "
+            f"works, by its name (python3 describe_benchmark.py --help)."
         )
     for parser in parsers:
         parser_dests = {action.dest for action in parser._actions}  # noqa: SLF001
@@ -127,8 +155,7 @@ def peek_config_path(argv: list[str]) -> Path | None:
 
 
 def check_required(args: argparse.Namespace, names: tuple[str, ...]) -> None:
-    """Some flags (module_dir, --container-image, --container-shared-dir)
-    are relaxed from argparse's own required=True/required-positional to
+    """Some flags (module_dir, --container-image) are relaxed from argparse's own required=True/required-positional to
     optional specifically so --config can supply them instead of the
     command line. This is the other half of that: called after the real
     parse_args(), it exits with a clear message -- naming both the CLI
@@ -137,12 +164,10 @@ def check_required(args: argparse.Namespace, names: tuple[str, ...]) -> None:
     """
     missing = [name for name in names if getattr(args, name, None) in (None, "")]
     if missing:
-        flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
-        keys = ", ".join(missing)
-        sys.exit(
-            f"Error: missing required value(s): {flags}. Pass them on the command line, "
-            f"or set {keys} in a --config file."
-        )
+        keys = ", ".join(PLAIN_NAME.get(name, name) for name in missing)
+        flags = ", ".join("module_dir" if name == "module_dir" else f"--{name.replace('_', '-')}"
+                          for name in missing)
+        sys.exit(f"Error: missing {keys} in the run config (or {flags} on the command line).")
 
 
 def parse_with_config(
@@ -158,7 +183,8 @@ def parse_with_config(
     """
     config_path = peek_config_path(argv)
     if config_path is not None:
-        apply_config(load_config_file(config_path), parser, source=config_path)
+        values = {k: v for k, v in load_config_file(config_path).items() if k not in WORKFLOW_ONLY}
+        apply_config(values, parser, source=config_path)
     args = parser.parse_args(argv)
     check_required(args, required)
     return args

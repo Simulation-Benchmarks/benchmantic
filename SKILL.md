@@ -24,7 +24,7 @@ Use this skill when the task involves any of:
 - Reviewing/editing AI-inferred metadata before it's committed to a benchmark description.
 - Rendering an existing `benchmark.jsonld` as a human-readable Markdown table for review.
 - Verifying that a generated description conforms to the `semantic_benchmark` schema/loader.
-- Producing a packaged, container-runnable Snakefile workflow, including mesh-splitting options for rotating-cylinder-style benchmarks.
+- Producing a packaged, container-runnable Snakefile workflow.
 - Running the full describe → review → build → validate pipeline end-to-end, e.g. for CI (with `--skip-review`).
 
 ## Installation
@@ -41,7 +41,7 @@ pip install groq rdflib
 pip install semantic-benchmark
 ```
 
-(a local clone also works: auto-detected as a sibling/child directory, or pass `--semantic-benchmark-src` / set `SEMANTIC_BENCHMARK_SRC`). `pip install pyyaml` too, only if you use `--config`.
+(always the pip-installed package; `--semantic-benchmark-src` / `SEMANTIC_BENCHMARK_SRC` use a local clone instead, e.g. to try changed shapes). `pip install pyyaml` too, only if you use `--config`.
 
 ## Quickstart
 
@@ -53,7 +53,7 @@ python3 workflow.py <module_dir> \
     --full-value-params Radial0 \
     --container-image <docker-image> \
     --container-shared-dir <host-mount-path> \
-    --mesh-split --zip-name-flag Problem.Name
+    --software DuMux --zip-name-flag Problem.Name
 ```
 
 `<module_dir>` can be the exact benchmark folder, a repository checkout containing one, or a GitHub/GitLab/any git URL (e.g. `https://github.com/org/repo`, `git@host:org/repo.git`) — cloned into a throwaway temp directory deleted once the run finishes, by default; pass `--keep-clone` to clone into a persistent local cache reused across runs instead (along with its inference cache), `--ref` to pin a branch/tag/commit, `--clone-dir` to pick an explicit clone location (implies `--keep-clone`), or `--fresh-clone` to discard and re-clone an existing persistent one. This walks you through selecting parameters, choosing which artifacts to generate, and (unless you chose the **Workflow only** preset) reviewing the AI-inferred metadata (an arrow-key curses screen on a real terminal for each, falling back to plain-text prompts otherwise -- see the Select outputs and Infer & review steps below), writes whichever of the semantic description, its dataset-provenance sidecar, a plain `Snakefile` (no zip), and `review.md` were selected, to `outputs/<software-name>/`, and validates the result (skipped entirely for **Workflow only**, which produces just the Snakefile) — exiting non-zero if verification fails. Both jsonld filenames default to a slug of the benchmark's own name -- `<benchmark-name>_benchmark.jsonld` (parameters/metrics/processing steps) + `<benchmark-name>_dataset.jsonld` (author/publisher/dependencies), neither suffix doubled up if the name already contains that word -- pass `--benchmark-filename`/`--dataset-filename` to force specific names instead. Output stays short by default (checklist lines + a final boxed summary), announced as six numbered steps (`1/6` through `6/6`) regardless of verbosity -- pass `-v`/`--verbose` or `--debug` for progressively more detail. For CI/non-interactive use, add `--skip-review` (this and the Outputs step both need a real terminal to prompt; without one, both are skipped automatically) and `--outputs <preset-or-list>` to fix which artifacts get generated without being asked. Skip individual pipeline steps with `--skip-show` / `--skip-check`. Instead of retyping a benchmark's usual flag set every run, save it to YAML and pass `--config <path>` (both `workflow.py` and `describe_benchmark.py` accept it; a flag also given on the command line still overrides the same key in the file) -- see `config.py`'s docstring for the exact format.
@@ -85,7 +85,7 @@ To fix a value after the fact (e.g. a `--skip-review` run, or something spotted 
 - `metadata/` — `builder.py`, `mapping.py` (benchmark parameters -> software inputs), `reference.py` (reads `--reference-benchmark`), `graph.py`, `repo_source.py` (resolves `module_dir`: local path, or clone/update a git URL), `repository.py`, `parameters.py`, `metrics.py`, `publication.py` — software-neutral benchmark.jsonld generation.
 - `ai/` — `prompts.py`, `mapping.py` (input-mapping inference), `inference.py`, `validation.py`, `review.py` (combined review/edit step, run between inference and graph-build; plain-text UI + the shared field-edit logic), `tui.py` (optional curses UI for the parameter selector, the review queue, and the Outputs-step picker, falls back to `review.py`/`metadata.builder`'s plain-text prompts automatically), `cache.py` (inference caching plus the Outputs-step selection persisted to `.benchmantic_outputs.json`), `corrections.py` — LLM-based semantic metadata inference and its cross-benchmark corrections memory.
 - `snakefile/` — `generator.py`, `renderer.py` — executable-workflow generation.
-- `software/` — one folder per simulation code, each a `software.yaml` with the code's basic details (`dumux/`, `openfoam/`; `_template/` to add one), read by `software/generic.py`; input readers in `software/formats/`, Snakefile styles in `snakefile/styles/`. DuMux adds `hooks.py` for `--mesh-split`. A new folder is registered automatically.
+- `software/` — no software-specific code. `resolve()` takes the software's name from the run config and uses `software_descriptions/<name>.yaml` (DuMux, OpenFOAM), or `autoconfig.py` has the LLM write a description (each proposal tried on the repository, cached as `.benchmantic_software.yaml`); `generic.py` does every step from the description; `template.yaml` documents its keys.
 
 ## Common edge cases
 
@@ -93,7 +93,7 @@ To fix a value after the fact (e.g. a `--skip-review` run, or something spotted 
 - **No `--skip-review`**: the review step also needs a real terminal (`input()`); unattended/CI runs must pass `--skip-review` or the run will hang there too, even with `--scenario-params` set.
 - **Missing required Snakefile flags**: `--container-image` and `--container-shared-dir` are required even if you only care about the `benchmark.jsonld` output.
 - **Verification failures**: a failing `verify_description.py` run should block downstream packaging/publishing — `workflow.py` already propagates this as a non-zero exit code.
-- **Rotating-cylinder / radial-mesh benchmarks**: only enable `--mesh-split` (and its `--radial-cells-flag`/`--angular-cells-flag`/`--grading-flag`) when the benchmark actually uses a radial mesh; it's not a general-purpose flag.
+- **Run config**: plain keys, the same for every software: `implementation`, `software` (a name), `container`, and optionally `reference`, `llm_model`, `review_below_confidence`, `verbose`, `software_description` (a description file of your own, possibly partial, or `llm` for a fresh LLM description) -- see `run-config-template.yaml`. Software-specific settings (e.g. DuMux's results zip named after `Problem.Name`) live in the software description. Old flat files with command-line option names still work.
 - **OpenFOAM template cases** (placeholders like `{omega}`, as in `output_template.zip`) have no values of their own: they need a reference benchmark (found automatically in the catalog repository), or point `module_dir` at a case with concrete values.
 - **Parameter names changed**: descriptions now use software-neutral names by default (plus `<name>_mapping.json`); pass `--parameter-names software` to keep the old `Section.Key` names.
 - **A benchmark parameter "not used by any input"** in reference mode means that implementation ignores it (e.g. OpenFOAM rotating-cylinders keeps the outer cylinder fixed) -- fine only while every configuration uses the value the software has built in.

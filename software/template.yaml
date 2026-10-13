@@ -2,21 +2,21 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# Template for a new simulation code. Copy this folder to software/<name>/
-# -- the folder name becomes the --software value --
-# and fill in the values below. Nothing else in the repository has to
-# change. software/dumux/ and software/openfoam/ are two complete examples.
-# Folders starting with "_" (like this one) are not loaded.
+# A software description: how a simulation software organises a benchmark
+# implementation, so benchmantic can read it and run it. You rarely write one
+# yourself: a run config only names the software (`software: MyCode`), and
+# benchmantic uses software_descriptions/<name>.yaml or lets the LLM write
+# the description. This file lists every key, for reading or fixing one.
 
 name: MyCode                         # the software's name, written to the description
 input_label: the MyCode input file   # how the inputs are called in messages
 display: "{section}:{key}"           # how one input is written for people
 
 # The folder holding the benchmark implementation. Either list files that
-# sit side by side in it (pick_option adds --<option> to choose one if
-# several such folders exist) ...
+# sit side by side in it (found anywhere below module_dir) ...
 implementation:
   files: [main.py]
+  # folder: path/to/it               # relative to module_dir, if several match
 # ... or leave `implementation` out: the benchmark is then the folder
 # holding the cases (as for OpenFOAM).
 
@@ -65,14 +65,27 @@ executable:
   # test_macros: [dumux_add_test]    # cmake: macros declaring a target, and
   # source: main.cc                  # the source that marks the right one
 
-snakefile:
-  style: command_line                # command_line | case_files (see snakefile/styles/)
-  build_dir: "{container_root}/{repository}/{module_path}"
-  command: "python3 main.py"
-  input_flag: '--{input} "{value}"'
-  # name_input: Output.Name          # the input naming the run's output
+run:                                 # how one case is run, in the container
+  type: program                      # program: one program, every input on its command line
+                                     # case_folder: inputs written into the case's files, then it is run
+  results_folder: /shared            # folder in the container where results are saved
+  working_folder: "{container_root}/{repository}/{implementation_path}"
+                                     # where the program runs; {container_root} is the folder above
+                                     # results_folder, {repository} the repository's name
+  command: "python3 main.py"         # program: the command; {executable} is the program found above
+  input_argument: '--{input} "{value}"'   # program: how one input is passed
+  # output_name_input: Output.Name   # program: the input that names the run's output
+  # results_zip_name_input: Output.Name  # program: name the results zip after this input
+  # run_script: Allrun               # case_folder: run this script if the case has one,
+  # command: "./Allrun"              #   with this command ...
+  # command_without_script: "{solver}"   # ... else this
+  # default_solver: mySolver
+  # set_value_command: 'setValue {section} {key} {value}'   # case_folder: set one input
+  # setup: "source /opt/env.sh"      # case_folder: shell lines run first
+  # metrics_arguments: "--single-case ."   # case_folder: arguments for the metrics script, if
+  # metrics_arguments_fallback: "."         #   it mentions their first word; else these
 
-llm_notes: |
+notes: |
   TODO: tell the LLM what a parameter's "ini": [section, key] pair is for
   this code (e.g. the input file section and the entry name), what
   "cpp_hint" and "code_context" contain, and naming conventions that imply

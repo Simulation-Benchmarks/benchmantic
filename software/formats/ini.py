@@ -9,7 +9,7 @@ INI input files ([Section] + key = value), e.g. DUNE/DuMux params.input.
 A parameter's (section, key) is the INI section and the key; a value's
 tokens are its whitespace-separated parts.
 
-Settings in software.yaml (under `inputs:`):
+Settings in the software description (under `inputs:`):
   files: [params.input]     the input file(s) in each case folder
   search: {...}             find the file if it isn't called that
                             (see software/param_files.py)

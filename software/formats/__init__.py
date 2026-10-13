@@ -5,7 +5,7 @@
 """
 software.formats
 
-Readers for input file formats, chosen in software.yaml with
+Readers for input file formats, chosen in the software description with
 `inputs: {format: ...}` and shared by every software using that format.
 Each format module provides:
 
@@ -33,5 +33,5 @@ def get_format(name: str) -> ModuleType:
     try:
         return FORMATS[name]
     except KeyError:
-        raise SystemExit(f"Error: unknown input format {name!r} in software.yaml; "
+        raise SystemExit(f"Error: unknown input format {name!r} in the software description; "
                          f"choose from {', '.join(FORMATS)}") from None

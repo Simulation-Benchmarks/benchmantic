@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# benchmantic run config. Copy this file, fill in the first block, and run
+#
+#     python3 workflow.py --config my-benchmark.yaml
+#
+# benchmantic reads your implementation, asks an LLM what each input and
+# output means (you review the answers), and writes a semantic description
+# of the benchmark plus a workflow that runs it in a container.
+#
+# The keys are the same for every simulation software. What differs between
+# software (file layout, input format, how a case is run) is in the
+# software's description -- see software_descriptions/.
+
+# --- what to describe ---------------------------------------------------------
+implementation: /path/to/your/benchmark   # your code: a folder, or a git URL
+software: DuMux                           # the simulation software it uses
+container: registry.example.org/my-benchmark:1.0   # the container image it runs in
+
+# --- optional -------------------------------------------------------------------
+# An existing description of the same benchmark, e.g. from the benchmark's
+# repository: parameters are then named and checked like there. Without it,
+# benchmantic looks for one itself; write `reference: none` to not use any.
+# reference: /path/to/benchmark/1.0.0/minimal-configurations.json
+
+# llm_model: openai/gpt-oss-120b      # which LLM to ask (default: the provider's default)
+# llm_provider: groq                  # groq (default) or openai
+# review_below_confidence: 0.99       # you review every LLM answer less sure than this (default 0.7)
+# verbose: true                       # show more detail while running
+
+# Your own description of the software, if benchmantic has none or gets it
+# wrong (it may be partial -- the LLM fills in the rest), or `llm` to have
+# the LLM write a new one:
+# software_description: my-software.yaml

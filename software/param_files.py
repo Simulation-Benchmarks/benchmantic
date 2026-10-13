@@ -5,9 +5,9 @@
 """
 software.param_files
 
-Finds a benchmark's parameter file when it isn't where software.yaml says
+Finds a benchmark's parameter file when it isn't where the software description says
 (e.g. a DuMux module whose inputs are in `rotating.input` instead of
-`params.input`). Turned on in software.yaml with
+`params.input`). Turned on in the software description with
 
   inputs:
     search:

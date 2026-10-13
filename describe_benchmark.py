@@ -51,11 +51,11 @@ parameter whose real-world unit is meters or pascals, that key won't match
 at runtime. See README.md's "Config files" section before relying on this
 mode for a benchmark with meter/pascal-valued parameters.
 
-Not tied to any one simulation tool: <module_dir> just needs to be
-something metadata.builder can already handle (a DUNE/DuMux-style module
-with main.cc/problem.hh/params.input, or a repo checkout containing one) --
-run it once per tool (DuMux, OpenFOAM, ...) with that tool's own
---software-name, --container-image, and mesh-split settings.
+Not tied to any one simulation tool: which software the benchmark uses,
+and how to read it, comes from --software (a name, a software config file,
+or a `software:` block in --config; see software/__init__.py) -- run it
+once per tool (DuMux, OpenFOAM, ...) with that tool's own --software and
+--container-image.
 
 The output directory is always outputs/<software-name>/ (--software-name,
 or if that's not given, the software name derived from the generated
@@ -89,7 +89,7 @@ Usage
         --full-value-params Radial0 \\
         --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
         --container-shared-dir /dumux/shared \\
-        --mesh-split --zip-name-flag Problem.Name
+        --software DuMux --zip-name-flag Problem.Name
 
 --software-name isn't needed above -- it's derived automatically from the
 generated benchmark file (e.g. "DuMux" -> "dumux"). Pass it explicitly only
@@ -119,11 +119,10 @@ import config  # noqa: E402
 import metadata.builder as builder  # noqa: E402
 import show_description  # noqa: E402
 import snakefile.generator as generator  # noqa: E402
-import software  # noqa: E402
+import snakefile.styles as snakefile_styles  # noqa: E402
 from metadata.graph import load_graph  # noqa: E402
-from metadata.croissant import relocate as relocate_croissant, write_croissant  # noqa: E402
 
-REQUIRED_FLAGS = ("module_dir", "container_image", "container_shared_dir")
+REQUIRED_FLAGS = ("module_dir", "container_image")
 
 
 def _slugify_benchmark_label(by_id: dict) -> str:
@@ -161,11 +160,6 @@ def mapping_filename_for(benchmark_filename: str) -> str:
     stem = Path(benchmark_filename).stem
     stem = stem[: -len("_benchmark")] if stem.endswith("_benchmark") else stem
     return f"{stem}_mapping.json"
-
-
-def croissant_filename_for(benchmark_filename: str) -> str:
-    """'rotating_cylinders_benchmark.jsonld' -> 'rotating_cylinders_croissant.json'."""
-    return mapping_filename_for(benchmark_filename).replace("_mapping.json", "_croissant.json")
 
 
 def derive_dataset_filename(by_id: dict) -> str:
@@ -263,8 +257,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # --- metadata.builder pass-through ---
     meta = ap.add_argument_group("metadata.builder options")
-    meta.add_argument("--software", choices=builder.SOFTWARE_CHOICES, default="auto",
-                       help="Simulation software (one per folder in software/; default: detected from the files).")
+    meta.add_argument("--software", default="auto",
+                       help="The simulation software's name, e.g. DuMux. benchmantic uses "
+                              "software_descriptions/<name>.yaml, or lets the LLM write a description. "
+                              "Default: the LLM works out the software too.")
+    meta.add_argument("--software-description", default=None, metavar="FILE",
+                       help="Use this software description instead (it may be partial: the LLM fills in the "
+                              "rest), or 'llm' to have the LLM write a new one even if benchmantic has one.")
+    meta.add_argument("--save-software-description", default=None, action=argparse.BooleanOptionalAction,
+                       help="Save a description the LLM wrote to software_descriptions/ without asking "
+                              "(--no-save-software-description: never). Default: ask on a terminal.")
     builder.add_mapping_args(meta)
     builder.add_semantic_override_args(meta)
     meta.add_argument("--scenario-params", type=str, default=None)
@@ -322,17 +324,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     snake.add_argument("--container-image", default=None,
                         help="Required, but may instead come from a 'container-image:' key in --config.")
     snake.add_argument("--container-shared-dir", default=None,
-                        help="Mount point inside the container used to save results back to the host "
-                             "-- no universal default, this is tool/container-specific. "
-                             "Required, but may instead come from a 'container-shared-dir:' key in --config.")
+                        help="Folder inside the container where results are saved. Default: "
+                             "`results_folder` in the software description.")
     snake.add_argument("--executable", default=None)
     snake.add_argument("--build-dir", default=None)
     snake.add_argument("--results-subdir", default="results")
     snake.add_argument("--unit-symbol", action="append", default=None)
 
-    # --- each software's own options (software/<name>/), one group each ---
-    software.add_arguments(ap)
-    software.add_snakefile_arguments(ap)
+    # --- options of the Snakefile styles (snakefile/styles/) ---
+    snakefile_styles.add_arguments(ap)
 
     ap.add_argument("-v", "--verbose", action="store_true",
                      help="Show the full underlying build output live, instead of the default short "
@@ -418,6 +418,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         math_model_id=args.math_model_id,
         no_mardi_lookup=args.no_mardi_lookup,
         software=args.software,
+        software_description=args.software_description,
+        save_software_description=args.save_software_description,
         reference_benchmark=args.reference_benchmark,
         no_reference=args.no_reference,
         parameter_names=args.parameter_names,
@@ -448,7 +450,6 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         skip_validation=args.skip_validation,
         validate_severity="REQUIRED",
         outputs=args.outputs,
-        **{dest: getattr(args, dest) for dest in software.argument_dests()},
     )
     # Two sub-steps inside metadata.builder.build() need a real terminal
     # (they call input()), so their output can't be silently captured into
@@ -567,21 +568,6 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         shutil.move(str(staged_mapping), str(mapping_path))
         if args.verbose or args.debug:
             print(f"-> Wrote {mapping_path}")
-
-    # Croissant description of the parameters: where each one is in the
-    # parameter file and how to extract it (see metadata.croissant).
-    staged_croissant = staging_dir / "staged.croissant.json"
-    croissant_path: Path | None = None
-    if staged_croissant.exists():
-        croissant_path = output_dir / croissant_filename_for(benchmark_filename)
-        # its file paths are relative to where it is: re-point them from
-        # the staging folder to the output folder
-        croissant_doc = json.loads(staged_croissant.read_text(encoding="utf-8"))
-        relocate_croissant(croissant_doc, staging_dir, output_dir)
-        write_croissant(croissant_doc, croissant_path)
-        staged_croissant.unlink()
-        if args.verbose or args.debug:
-            print(f"-> Wrote {croissant_path}")
     shutil.rmtree(staging_dir, ignore_errors=True)
 
     # 2. Snakefile -- generated into a throwaway workdir alongside the
@@ -635,7 +621,7 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
-    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, croissant_path, snakefile_path, review_path)
+    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, snakefile_path, review_path)
                       if p is not None]
     _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path

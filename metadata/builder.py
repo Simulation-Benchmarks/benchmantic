@@ -46,8 +46,6 @@ from metadata.metrics import DEFAULT_METRIC_UNIT, KNOWN_METRIC_UNITS, build_metr
 from metadata.parameters import build_parameter_fields
 from metadata import mardi
 import software
-from software import SOFTWARE_CHOICES, get_adapter
-from metadata.croissant import build_croissant, write_croissant
 from metadata.mapping import (
     InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
     neutral_name, render, template_consistency,
@@ -1315,13 +1313,7 @@ def add_semantic_override_args(ap) -> None:
 
 
 def add_mapping_args(ap) -> None:
-    """--reference-benchmark / --parameter-names / --croissant-anchor, shared with describe_benchmark.py."""
-    ap.add_argument("--croissant-anchor", choices=["key", "line", "none"], default="key",
-                    help="Also write <name>_croissant.json: each parameter as a Croissant 1.1 field with its "
-                         "location in the parameter file and the extract/transform steps that read its value. "
-                         "The transform regex finds the value by section and key ('key', default; works on "
-                         "every case file) or by line and column ('line'; exact for the template file). "
-                         "'none' skips the file.")
+    """--reference-benchmark / --parameter-names, shared with describe_benchmark.py."""
     ap.add_argument("--reference-benchmark", type=Path, default=None, metavar="JSONLD",
                     help="An existing description of the same benchmark to map onto. Default: looked "
                          "for automatically -- a benchmark description in the repository (e.g. "
@@ -1371,11 +1363,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "location, delete it and clone from scratch instead of fetching/checking it out "
                           "in place. Has no effect on the default throwaway clone (already always fresh). "
                           "Ignored for a local module_dir.")
-    ap.add_argument("--software", choices=SOFTWARE_CHOICES, default="auto",
-                     help="Simulation software of the benchmark implementation (one per folder in "
-                          "software/). Default: detected from the files.")
+    ap.add_argument("--software", default="auto",
+                     help="The simulation software's name, e.g. DuMux. benchmantic uses "
+                          "software_descriptions/<name>.yaml, or lets the LLM write a description. "
+                          "Default: the LLM works out the software too.")
+    ap.add_argument("--software-description", default=None, metavar="FILE",
+                     help="Use this software description instead (it may be partial: the LLM fills in the "
+                          "rest), or 'llm' to have the LLM write a new one even if benchmantic has one.")
+    ap.add_argument("--save-software-description", default=None, action=argparse.BooleanOptionalAction,
+                     help="Save a description the LLM wrote to software_descriptions/ without asking "
+                          "(--no-save-software-description: never). Default: ask on a terminal.")
     add_mapping_args(ap)
-    software.add_arguments(ap)
     ap.add_argument("--output", type=Path, default=Path("metadata.jsonld"))
     add_semantic_override_args(ap)
     ap.add_argument("--scenario-params", type=str, default=None,
@@ -1511,7 +1509,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     # accidentally pull in cases/params from unrelated benchmarks elsewhere
     # in the same repo.
     repo_root = args.module_dir
-    adapter = get_adapter(repo_root, getattr(args, "software", "auto"))
+    adapter = software.resolve(repo_root, getattr(args, "software", "auto"), args)
     module_dir = adapter.find_module_dir(repo_root, args)
     if args.verbose:
         print(f"Software: {adapter.name}")
@@ -1837,6 +1835,9 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
             benchmark_description,
         )
 
+    if args.full_value_params and reference is not None:
+        print("note: --full-value-params has no effect with a reference benchmark -- the parameters and "
+              "their values come from the reference.")
     if args.full_value_params and reference is None:
         full_value_keys = {k.strip().lower() for k in args.full_value_params.split(",") if k.strip()}
         matched = 0
@@ -1922,14 +1923,6 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         if args.verbose:
             print(f"Wrote {mapping_path}")
 
-    anchor = getattr(args, "croissant_anchor", "key")
-    if anchor != "none":
-        croissant_path = args.output.with_name(args.output.stem + ".croissant.json")
-        write_croissant(build_croissant(adapter, module_dir, raw_candidates, filtered_parameter_fields,
-                                        manifest, anchor, base_dir=croissant_path.parent), croissant_path)
-        if args.verbose:
-            print(f"Wrote {croissant_path}")
-
     doc = {"@context": DEFAULT_CONTEXT, "@graph": builder.graph}
     args.output.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     if args.verbose:
@@ -1964,6 +1957,7 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         "module_relative_path": module_relative_path,
         "software": adapter.name,
         **adapter.build_hints(module_dir, repo_root),
+        **_software_spec_hint(adapter),
     }
     build_hints_path = args.output.with_name(args.output.stem + ".build_hints.json")
     build_hints_path.write_text(json.dumps(build_hints, indent=2), encoding="utf-8")
@@ -2286,6 +2280,13 @@ def _assign_neutral_names(fields: dict[str, Any]) -> None:
         spec["label"] = label
 
 
+def _software_spec_hint(adapter) -> dict[str, Any]:
+    """The software config travels to the Snakefile step in the
+    build_hints sidecar."""
+    spec = getattr(adapter, "spec", None)
+    return {"software_spec": spec} if spec else {}
+
+
 def _repository_root(path: Path) -> Path:
     """The enclosing git repository's root (a folder containing .git), or
     `path` itself when it isn't inside one."""
@@ -2388,6 +2389,7 @@ def _generate_snakefile_only(
     build_hints = {
         "executable_name": executable_name,
         "module_relative_path": module_relative_path,
+        **_software_spec_hint(adapter),
     }
     build_hints_path = args.output.with_name(args.output.stem + ".build_hints.json")
     build_hints_path.write_text(json.dumps(build_hints, indent=2), encoding="utf-8")

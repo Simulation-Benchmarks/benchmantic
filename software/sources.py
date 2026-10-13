@@ -6,7 +6,7 @@
 software.sources
 
 Ways of reading a benchmark implementation's sources that any software can
-pick in its software.yaml -- the label and description of the benchmark,
+pick in its software description -- the label and description of the benchmark,
 the executable, hints on where the code reads an input, and the files its
 metrics come from. Each function here is one named choice in the config
 (e.g. `label: cpp_class`, `executable: {from: cmake}`).

@@ -27,8 +27,8 @@ from metadata.graph import find_all, load_graph
 from metadata.graph import node_id as _id
 from metadata.mapping import load_mapping, mapping_path_for
 from snakefile.renderer import DEFAULT_UNIT_SYMBOLS, render_parameters_json
-import software
-from software import SnakefileContext, adapter_for_label
+from snakefile import styles as snakefile_styles
+from software import SnakefileContext
 
 def extract_case_parameters(by_id: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """{case_id: {"Section.Key": value, ...}} for every m4i:ParameterSet in
@@ -102,6 +102,17 @@ def derive_software_name(by_id: dict[str, dict[str, Any]]) -> str:
     return slug or "benchmark"
 
 
+def _adapter_from_hints(build_hints: dict[str, Any]):
+    """The software config the description was made with, recorded in the
+    build_hints sidecar (see metadata.builder._software_spec_hint)."""
+    spec = build_hints.get("software_spec")
+    if not spec:
+        return None
+    from software.generic import GenericAdapter
+
+    return GenericAdapter.from_spec(spec)()
+
+
 def load_build_hints(metadata_jsonld_path: Path) -> dict[str, Any]:
     """Load the non-RO-Crate sidecar file generate_metadata.py writes next
     to metadata.jsonld (e.g. 'metadata.build_hints.json' for
@@ -157,7 +168,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "hand directly to run_benchmark.py's --benchmark-zip. run_benchmark.py generates its "
                           "own parameters.json per configuration from the benchmark file at runtime, so only "
                           "the Snakefile itself needs to be in this archive.")
-    software.add_snakefile_arguments(ap)
+    snakefile_styles.add_arguments(ap)
     return ap
 
 
@@ -172,12 +183,10 @@ def generate(args: argparse.Namespace) -> None:
     mapping = load_mapping(mapping_file) if mapping_file else None
 
     software_name = args.software_name or derive_software_name(by_id)
-    label = ((mapping or {}).get("software") or build_hints.get("software")
-             or (by_id.get("local:software") or {}).get("label") or software_name)
-    adapter = adapter_for_label(label)
+    adapter = _adapter_from_hints(build_hints)
     if adapter is None:
-        supported = ", ".join(a.name for a in software.ADAPTERS)
-        sys.exit(f"Error: no Snakefile support for software {label!r} (supported: {supported}).")
+        sys.exit(f"Error: {args.metadata_jsonld.stem}.build_hints.json next to {args.metadata_jsonld} has no "
+                 "software description -- make the benchmark description again with this version of benchmantic.")
     if args.container_shared_dir is None:
         args.container_shared_dir = adapter.default_container_shared_dir
     if args.output_dir is None:
@@ -228,7 +237,7 @@ def generate(args: argparse.Namespace) -> None:
 def namespace_for(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
     """The Namespace generate() expects, taken from another parser's
     parsed options (describe_benchmark.py's) -- every option this module
-    and the software adapters define, so callers don't list them."""
+    and the Snakefile styles define, so callers don't list them."""
     dests = [a.dest for a in build_arg_parser()._actions if a.dest != "help"]  # noqa: SLF001
     values = {d: getattr(args, d, None) for d in dests}
     values.update(overrides)

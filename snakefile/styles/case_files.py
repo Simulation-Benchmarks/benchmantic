@@ -11,17 +11,17 @@ the case template), writes each mapped benchmark parameter into the case's
 files, runs the case, then the metrics script.
 
   template placeholder {x} -> sed into the file (X.template -> X, or in place)
-  plain entry              -> `set_entry` command
+  plain entry              -> `set_value_command`
 
-Settings in software.yaml (under `snakefile:`):
-  run_script: Allrun                  run this script in the case if it has one
-  run: "chmod +x Allrun && ./Allrun"  ... with this command
-  run_without_script: "..."           otherwise this ({application} available)
-  default_application: simpleFoam     when the case doesn't name one
-  set_entry: '... {key} ... {value} ... {section}'
-  environment: |                      shell lines before setting entries
-  metrics_args: "--single-case ."     arguments for the metrics script if it
-  metrics_args_fallback: "."          mentions their first word, else these
+Settings in the software description (`run:`, with `type: case_folder`):
+  run_script: Allrun                      run this script in the case if it has one
+  command: "chmod +x Allrun && ./Allrun"  ... with this command
+  command_without_script: "..."           otherwise this ({solver} available)
+  default_solver: simpleFoam              when the case doesn't name one
+  set_value_command: '... {key} ... {value} ... {section}'
+  setup: |                                shell lines before setting values
+  metrics_arguments: "--single-case ."    arguments for the metrics script if it
+  metrics_arguments_fallback: "."         mentions their first word, else these
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def add_arguments(group) -> None:
 
 
 def build_hints(adapter, module_dir: Path, repo_root: Path) -> dict[str, Any]:
-    settings = adapter.snakefile_settings
+    settings = adapter.run_settings
     case_dir = adapter.template_case(module_dir)
     run_script = settings.get("run_script")
     hints: dict[str, Any] = {
@@ -51,20 +51,20 @@ def build_hints(adapter, module_dir: Path, repo_root: Path) -> dict[str, Any]:
     scripts = [p for p in adapter.metric_files(module_dir, repo_root) if p.suffix == ".py"]
     if scripts:
         script = scripts[0]
-        args = settings.get("metrics_args", ".")
-        fallback = settings.get("metrics_args_fallback", ".")
+        args = settings.get("metrics_arguments", ".")
+        fallback = settings.get("metrics_arguments_fallback", ".")
         hints["metrics_script"] = script.name
         hints["metrics_args"] = args if args.split()[0] in script.read_text(encoding="utf-8") else fallback
     return hints
 
 
 def _application(adapter, hints: dict[str, Any]) -> str:
-    return hints.get("executable_name") or adapter.snakefile_settings.get("default_application") or "solver"
+    return hints.get("executable_name") or adapter.run_settings.get("default_solver") or "solver"
 
 
 def render_mapped(adapter, mapping: dict[str, Any], hints: dict[str, Any], args,
                   units: dict[str, str], unit_symbols: dict[str, str]) -> str:
-    settings = adapter.snakefile_settings
+    settings = adapter.run_settings
     name = adapter.name
     inputs = [i for i in mapping["inputs"] if i.get("expression")]
     names = sorted({n for i in inputs for n in i.get("benchmark_parameters", [])})
@@ -83,17 +83,17 @@ def render_mapped(adapter, mapping: dict[str, Any], hints: dict[str, Any], args,
             else:
                 inplace_cmds.append(f'sed -i "{pattern}" {section}')
         else:
-            entry_cmds.append(settings["set_entry"].format(key=i["key"], value=value, section=section))
+            entry_cmds.append(settings["set_value_command"].format(key=i["key"], value=value, section=section))
     lines = [f'sed {" ".join(cmds)} {section} > {section[: -len(TEMPLATE_SUFFIX)]}'
              for section, cmds in template_cmds.items()]
     lines += inplace_cmds
     setup = "\n            ".join(lines) or ": # no template placeholders"
     entry_setup = "\n            ".join(entry_cmds) or ": # no dictionary entries to set"
-    environment = "\n            ".join((settings.get("environment") or ":").rstrip("\n").splitlines())
+    environment = "\n            ".join((settings.get("setup") or ":").rstrip("\n").splitlines())
 
     application = _application(adapter, hints)
-    run_case = (settings["run"] if hints.get("has_run_script")
-                else settings["run_without_script"].format(application=application))
+    run_case = (settings["command"] if hints.get("has_run_script")
+                else settings["command_without_script"].format(solver=application))
     metrics_script = hints.get("metrics_script")
     metrics_rule = f'''
 rule compute_metrics:
@@ -166,12 +166,12 @@ def render(adapter, ctx: SnakefileContext) -> SnakefileResult:
         )
     text = render_mapped(adapter, mapping, hints, ctx.args, ctx.units, ctx.unit_symbols)
     mapped = [i["input"] for i in mapping["inputs"] if i.get("expression")]
-    run_script = adapter.snakefile_settings.get("run_script")
+    run_script = adapter.run_settings.get("run_script")
     application = _application(adapter, hints)
     summary = (
         f"\n{len(ctx.cases)} case(s), {len(mapped)} mapped input(s): {', '.join(mapped)}\n"
         f"application = {application}\n"
-        f"case run    = {run_script if hints.get('has_run_script') else adapter.snakefile_settings['run_without_script'].format(application=application)}"
+        f"case run    = {run_script if hints.get('has_run_script') else adapter.run_settings['command_without_script'].format(solver=application)}"
         + (f"\nmetrics     = {hints['metrics_script']} {hints.get('metrics_args', '.')}"
            if hints.get("metrics_script") else "\nmetrics     = (no script found)")
     )

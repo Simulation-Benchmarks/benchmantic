@@ -30,10 +30,10 @@ Install:
 
     pip install semantic-benchmark      # brings rdflib + pyshacl
 
-A local git clone of semantic-benchmark still works too (auto-detected as a
-sibling/child ./semantic-benchmark, or via --semantic-benchmark-src /
-SEMANTIC_BENCHMARK_SRC), as long as it's recent enough to have
-BenchmarkLoader.load_shapes().
+The pip-installed package is used. A local git clone of semantic-benchmark
+is only used when asked for (--semantic-benchmark-src or
+SEMANTIC_BENCHMARK_SRC -- e.g. to try changes to the shapes), or as a last
+resort when the package isn't installed (a sibling/child ./semantic-benchmark).
 
 Usage
 -----
@@ -77,13 +77,9 @@ def _warn(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _candidate_src_dirs() -> list[Path]:
-    """Places a plain `git clone` of semantic-benchmark might sit, checked
-    in order (as repo roots -- _resolve_src_dir() handles finding src/
-    underneath, or using the path directly if it's already a src/ dir)."""
+    """Where a plain `git clone` of semantic-benchmark might sit -- only
+    looked at when the pip package isn't installed."""
     candidates = []
-    env = os.environ.get("SEMANTIC_BENCHMARK_SRC")
-    if env:
-        candidates.append(Path(env))
     for base in (Path.cwd(), SCRIPT_DIR, SCRIPT_DIR.parent):
         candidates.append(base / "semantic-benchmark")
         candidates.append(base / "semantic_benchmark")
@@ -102,31 +98,47 @@ def _resolve_src_dir(path: Path) -> Path | None:
     return None
 
 
-def _import_semantics(explicit_src: Path | None):
-    """Import semantic_benchmark.semantics -- from an explicit/auto-detected
-    clone first, otherwise the pip-installed package. Exits with install
-    instructions if neither works, or if the version found predates
-    BenchmarkLoader.load_shapes().
-    """
-    module, used_src = None, None
-    search_paths = [explicit_src] if explicit_src else _candidate_src_dirs()
-    for candidate in search_paths:
-        if not candidate:
-            continue
-        src_dir = _resolve_src_dir(candidate)
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("semantic-benchmark")
+    except Exception:  # noqa: BLE001 -- the version is only informational
+        return "(version unknown)"
+
+
+def _import_from_clone(candidates):
+    for candidate in candidates:
+        src_dir = _resolve_src_dir(candidate) if candidate else None
         if src_dir is None:
             continue
         sys.path.insert(0, str(src_dir))
         try:
-            module, used_src = importlib.import_module("semantic_benchmark.semantics"), src_dir
-            break
+            return importlib.import_module("semantic_benchmark.semantics"), src_dir
         except ImportError:
             sys.path.pop(0)
+    return None, None
 
-    if module is None:
+
+def _import_semantics(explicit_src: Path | None):
+    """Import semantic_benchmark.semantics: from a clone asked for
+    (--semantic-benchmark-src, SEMANTIC_BENCHMARK_SRC), else the
+    pip-installed package, else -- as a last resort -- a clone found next to
+    benchmantic. Exits with install instructions if none works, or if the
+    version found predates BenchmarkLoader.load_shapes().
+    """
+    env = os.environ.get("SEMANTIC_BENCHMARK_SRC")
+    asked = explicit_src or (Path(env) if env else None)
+    if asked is not None:
+        module, used_src = _import_from_clone([asked])
+        if module is None:
+            sys.exit(f"Error: no semantic_benchmark package found in {asked} "
+                     "(expected <clone>/src/semantic_benchmark/).")
+    else:
         try:
-            module = importlib.import_module("semantic_benchmark.semantics")
+            module, used_src = importlib.import_module("semantic_benchmark.semantics"), None
         except ImportError:
+            module, used_src = _import_from_clone(_candidate_src_dirs())
+        if module is None:
             sys.exit(
                 "Error: couldn't import semantic_benchmark.\n\n"
                 "Install it (this also installs rdflib and pyshacl):\n"
@@ -326,9 +338,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("benchmark_jsonld", type=Path, nargs="?",
                     help="The benchmark JSON-LD file to verify (optional with --export-shapes).")
     ap.add_argument("--semantic-benchmark-src", type=Path, default=None,
-                    help="Path to a semantic-benchmark git clone (or its src/ directory). Default: "
-                         "auto-detect a sibling/child ./semantic-benchmark, the SEMANTIC_BENCHMARK_SRC "
-                         "environment variable, or the pip-installed package.")
+                    help="Use this semantic-benchmark git clone (or its src/ directory) instead of the "
+                         "pip-installed package, e.g. to try changes to the shapes. Also: the "
+                         "SEMANTIC_BENCHMARK_SRC environment variable.")
     ap.add_argument("--shapes", type=Path, default=None,
                     help="Validate against this Turtle shapes file instead of the shapes bundled "
                          "with semantic_benchmark (e.g. to try a draft of new shapes).")
@@ -349,6 +361,8 @@ def run(args: argparse.Namespace) -> int:
     semantics_module, used_src = _import_semantics(args.semantic_benchmark_src)
     if used_src:
         print(f"(using semantic_benchmark from {used_src}, not the pip-installed package)")
+    else:
+        print(f"(using semantic_benchmark {_package_version()}, pip-installed)")
 
     shapes_graph, shapes_source = _load_shapes(semantics_module, getattr(args, "shapes", None))
 

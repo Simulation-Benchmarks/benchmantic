@@ -5,128 +5,135 @@
 """
 software
 
-One folder per supported simulation code, registered automatically --
-adding a code means adding a folder, nothing else:
+Which simulation software a benchmark uses, and how benchmantic reads it.
+benchmantic holds no software-specific code: a *software description*
+(software/template.yaml lists every key) says how a software organises an
+implementation. The run config only names the software; resolve() then
 
-  software/<name>/software.yaml   the usual case: the basic details of the
-                                  code, read by software.generic
-  software/<name>/__init__.py     only for a code no config can describe:
-                                  exports `Adapter`, a SoftwareAdapter
-                                  subclass written in Python
+  1. uses software_descriptions/<name>.yaml when there is one,
+  2. otherwise lets the LLM write the description (software.autoconfig).
 
-Folders starting with "_" (e.g. _template) are skipped, and so are the
-shared packages here (formats/).
+With no software named, the first of its own descriptions that fits the
+implementation is used, else the LLM is asked.
 
-`get_adapter(root, name)` returns the adapter named by --software, or
-auto-detects one from the files under `root`. `adapter_for_label(label)`
-finds the adapter for a description's software label ("DuMux").
+`software-description` in the run config points at a description file of
+your own instead -- it may be partial; the LLM fills in the rest.
 """
 
 from __future__ import annotations
 
-import argparse
-import importlib
+import re
 import sys
 from pathlib import Path
+from typing import Any
 
 from software.base import SnakefileContext, SnakefileResult, SoftwareAdapter
 
-__all__ = [
-    "ADAPTERS", "SOFTWARE_CHOICES", "SnakefileContext", "SnakefileResult", "SoftwareAdapter",
-    "adapter_for_label", "add_arguments", "add_snakefile_arguments", "argument_dests", "get_adapter",
-    "snakefile_argument_dests",
-]
+__all__ = ["DESCRIPTIONS_DIR", "SnakefileContext", "SnakefileResult", "SoftwareAdapter", "find_description",
+           "get_adapter", "load_description", "resolve"]
+
+#: benchmantic's own folder.
+ROOT = Path(__file__).resolve().parents[1]
+#: Software descriptions benchmantic knows (one YAML file per software).
+DESCRIPTIONS_DIR = ROOT / "software_descriptions"
+#: `software-description` value that asks the LLM for a new description.
+ASK_LLM = "llm"
 
 
-def _discover() -> list[type[SoftwareAdapter]]:
-    from software.generic import GenericAdapter
-
-    found: list[type[SoftwareAdapter]] = []
-    folders = sorted({d for base in __path__ for d in Path(base).iterdir() if d.is_dir()}, key=lambda d: d.name)
-    for folder in folders:
-        if folder.name.startswith(("_", ".")):
-            continue
-        if (folder / "software.yaml").is_file():
-            found.append(GenericAdapter.for_folder(folder))
-            continue
-        if not (folder / "__init__.py").is_file():
-            continue
-        module = importlib.import_module(f"{__name__}.{folder.name}")
-        cls = getattr(module, "Adapter", None)
-        if cls is None:
-            continue  # a shared package such as formats/, not a software
-        if not (isinstance(cls, type) and issubclass(cls, SoftwareAdapter)):
-            raise ImportError(f"software/{folder.name}/__init__.py: `Adapter` must be a subclass of "
-                              "software.base.SoftwareAdapter")
-        cls.slug = cls.slug or folder.name
-        found.append(cls)
-    return found
+def _slug(name: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "-", name.lower()).strip("-")
 
 
-ADAPTERS: list[type[SoftwareAdapter]] = _discover()
-SOFTWARE_CHOICES = ["auto"] + [a.slug for a in ADAPTERS]
+def load_description(path_text: str) -> dict[str, Any]:
+    """A description file: as given (absolute, or relative to the current
+    folder), else relative to benchmantic's own folder."""
+    from software.generic import load_spec
+
+    for path in (Path(path_text).expanduser(), ROOT / path_text):
+        if path.is_file():
+            return load_spec(path, require_name=False)
+    sys.exit(f"Error: software description {path_text} not found (looked in the current folder and in {ROOT}).")
 
 
-def get_adapter(root: Path, name: str | None = "auto") -> SoftwareAdapter:
-    if name and name != "auto":
-        for cls in ADAPTERS:
-            if cls.slug == name.lower():
-                return cls()
-        sys.exit(f"Error: unknown --software {name!r}; choose from {', '.join(SOFTWARE_CHOICES)}")
-    matches = [cls for cls in ADAPTERS if cls.detect(root)]
-    if not matches:
-        supported = ", ".join(a.name for a in ADAPTERS)
-        sys.exit(f"Error: could not recognise the simulation software under {root} (supported: {supported}).")
-    if len(matches) > 1:
-        names = ", ".join(m.slug for m in matches)
-        sys.exit(f"Error: {root} contains implementations for several codes ({names}); "
-                 "pass --software to pick one, or point module_dir at one implementation.")
-    return matches[0]()
-
-
-def adapter_for_label(label: str | None) -> SoftwareAdapter | None:
-    """The adapter whose name or slug matches `label` (case-insensitive)."""
-    wanted = (label or "").strip().lower()
-    for cls in ADAPTERS:
-        if wanted in (cls.name.lower(), cls.slug):
-            return cls()
+def find_description(name: str) -> Path | None:
+    """software_descriptions/<name>.yaml, or the file whose `name:` is
+    `name` (case-insensitive)."""
+    wanted = name.strip().lower()
+    for path in sorted(DESCRIPTIONS_DIR.glob("*.yaml")):
+        if path.stem.lower() == _slug(name):
+            return path
+        m = re.search(r"^name:\s*(.+?)\s*$", path.read_text(encoding="utf-8"), re.MULTILINE)
+        if m and m.group(1).strip("'\"").lower() == wanted:
+            return path
     return None
 
 
-def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Each software's own discovery options, one group per software."""
-    for cls in ADAPTERS:
-        cls.add_arguments(parser.add_argument_group(f"{cls.name} options"))
+def _fitting_description(root: Path, args: Any) -> Path | None:
+    """No software named: the first of benchmantic's own descriptions that
+    fits the implementation, if any."""
+    from software import autoconfig
+
+    for path in sorted(DESCRIPTIONS_DIR.glob("*.yaml")):
+        if not autoconfig.check(load_description(str(path)), root, args):
+            return path
+    return None
 
 
-def add_snakefile_arguments(parser: argparse.ArgumentParser) -> None:
-    """Snakefile options: once per Snakefile style in use (styles are
-    shared between codes), then each software's own extras."""
-    styles: dict[str, list[str]] = {}
-    for cls in ADAPTERS:
-        style = getattr(cls, "style", None)
-        if style is not None:
-            styles.setdefault(style().__name__.rsplit(".", 1)[-1], []).append(cls.name)
-    for style_name, users in styles.items():
-        from snakefile.styles import get_style
-        get_style(style_name).add_arguments(
-            parser.add_argument_group(f"Snakefile options, {style_name} style ({', '.join(users)})"))
-    for cls in ADAPTERS:
-        cls.add_snakefile_arguments(parser.add_argument_group(f"{cls.name} Snakefile options"))
+def resolve(root: Path, name: str | None, args: Any = None) -> SoftwareAdapter:
+    """The adapter for the software named in the run config (`software:`),
+    or given as a description file (`software-description:`)."""
+    from software import autoconfig
+    from software.generic import GenericAdapter
+
+    name = None if name in (None, "", "auto") else str(name)
+    description = getattr(args, "software_description", None)
+    if name and name.endswith((".yaml", ".yml")):     # a description file given as `software:`
+        name, description = None, description or name
+    verbose = getattr(args, "verbose", False)
+
+    if description and description != ASK_LLM:
+        settings = load_description(str(description))
+        if name and not settings.get("name"):
+            settings["name"] = name
+        source = str(description)
+    else:
+        known = find_description(name) if name and description != ASK_LLM else None
+        if not name and not description:
+            known = _fitting_description(root, args)
+        settings = load_description(str(known)) if known else ({"name": name} if name else {})
+        source = str(known.relative_to(ROOT)) if known else None
+
+    if source and settings.get("name"):
+        problems = autoconfig.check(settings, root, args)
+        if not problems:
+            if verbose:
+                print(f"Software: {settings['name']} (description: {source})")
+            return GenericAdapter.from_spec(settings)()
+        if description:
+            print(f"The software description {source} is incomplete or doesn't fit this implementation "
+                  "-- the LLM fills in the rest:\n  - " + "\n  - ".join(problems))
+        else:
+            print(f"The software description {source} doesn't fit this implementation:\n  - "
+                  + "\n  - ".join(problems))
+            # benchmantic's own description doesn't fit: the LLM writes one,
+            # with that description as the first example
+            print(f"Asking the LLM for a description that fits (with {source} as an example).")
+            settings = {"name": settings["name"]}
+    return GenericAdapter.from_spec(autoconfig.complete(root, settings, args))()
 
 
-def _dests(add) -> list[str]:
-    parser = argparse.ArgumentParser(add_help=False)
-    add(parser)
-    return [action.dest for action in parser._actions]  # noqa: SLF001 -- no public accessor
+def get_adapter(root: Path, name: str | None = "auto") -> SoftwareAdapter:
+    """resolve() without run settings, for tools that only name the software."""
+    return resolve(root, name)
 
 
-def argument_dests() -> list[str]:
-    """Namespace attributes of every software's discovery options -- what a
-    caller forwards to metadata.builder without listing them itself."""
-    return _dests(add_arguments)
+def __getattr__(attr: str) -> Any:
+    """`software.ADAPTERS`: one adapter class per description in
+    software_descriptions/ (slug = file name), for tools and tests that
+    pick one directly."""
+    if attr == "ADAPTERS":
+        from software.generic import GenericAdapter
 
-
-def snakefile_argument_dests() -> list[str]:
-    """Namespace attributes of every software's Snakefile options."""
-    return _dests(add_snakefile_arguments)
+        return [GenericAdapter.from_spec(load_description(str(p)), slug=p.stem)
+                for p in sorted(DESCRIPTIONS_DIR.glob("*.yaml"))]
+    raise AttributeError(f"module 'software' has no attribute {attr!r}")

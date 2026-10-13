@@ -17,7 +17,7 @@ references and directives such as #include, #eval{ ... } / #calc "...". Not
 a full OpenFOAM parser -- it's for discovering input parameters, not for
 evaluating a case.
 
-Settings in software.yaml (under `inputs:`):
+Settings in the software description (under `inputs:`):
   folders: [system, constant, "0", "0.orig"]   case sub-folders whose
                                                dictionaries are inputs
 """

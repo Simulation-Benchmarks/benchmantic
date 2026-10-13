@@ -16,8 +16,8 @@ pipeline (caches, LLM inference, review, graph, mapping). What the pair
 means is up to the adapter -- e.g. an INI [Section] + key for DuMux, or a
 dictionary file + entry path for OpenFOAM.
 
-To add a code, copy software/_template/ to software/<name>/ and fill it
-in; the registry (software/__init__.py) picks the folder up by itself.
+software.generic.GenericAdapter implements this for any software config
+(software/template.yaml); software.resolve() builds it from the run config.
 """
 
 from __future__ import annotations
@@ -139,18 +139,6 @@ class SoftwareAdapter:
     def executable_name(self, module_dir: Path, repo_root: Path) -> tuple[str | None, Path | None]:
         """(executable/solver name, file it was read from)."""
         return None, None
-
-    # --- command-line options ----------------------------------------------
-    @classmethod
-    def add_arguments(cls, group: argparse._ArgumentGroup) -> None:
-        """Discovery options only this software needs (e.g. DuMux's
-        --main-cc). Added to metadata.builder and describe_benchmark.py."""
-
-    @classmethod
-    def add_snakefile_arguments(cls, group: argparse._ArgumentGroup) -> None:
-        """Snakefile options only this software needs (e.g. DuMux's
-        --mesh-split). Added to snakefile.generator and
-        describe_benchmark.py."""
 
     # --- workflow --------------------------------------------------------------
     def render_snakefile(self, ctx: SnakefileContext) -> SnakefileResult:

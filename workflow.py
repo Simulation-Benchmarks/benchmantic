@@ -22,12 +22,13 @@ Runs the full local dev loop in one command:
    you'd expect in CI.
 
 All of describe_benchmark's own options (module_dir, --scenario-params,
---container-image, --mesh-split, etc.) are accepted here too and passed
+--container-image, --software, etc.) are accepted here too and passed
 straight through -- run `python3 describe_benchmark.py --help` for the full
 list, since this script doesn't duplicate that help text. Two extra
 options control the later steps:
 
-    --semantic-benchmark-src PATH   passed through to verify_description
+    --semantic-benchmark-src PATH   a semantic-benchmark clone for verify_description
+                                     (default: the pip-installed package)
     --show-output PATH              passed through to show_description
                                      (saves the tables to a file instead of
                                      printing them)
@@ -46,8 +47,7 @@ Usage
         --full-value-params Radial0 \\
         --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
         --container-shared-dir /dumux/shared \\
-        --mesh-split --zip-name-flag Problem.Name \\
-        --semantic-benchmark-src ../semantic-benchmark
+        --software DuMux --zip-name-flag Problem.Name
 
     # ...or, with the same flags saved in a file (see config.py for the
     # exact key names -- same as the flags above, minus the leading "--"):

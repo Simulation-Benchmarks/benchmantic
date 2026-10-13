@@ -8,6 +8,9 @@
 # entries; template placeholders such as "omega {omega};" are the inputs a
 # benchmark sets per run. Metrics are the keys a post-processing script
 # writes to solution_metrics.json.
+#
+# Used whenever a run config says `software: OpenFOAM`, and shown to the LLM
+# as an example when it writes a description for another software.
 
 name: OpenFOAM
 input_label: the OpenFOAM case dictionaries
@@ -46,23 +49,23 @@ executable:
   file: system/controlDict
   key: application
 
-snakefile:
-  style: case_files
-  run_script: Allrun
-  run: "chmod +x Allrun && ./Allrun"
-  run_without_script: "blockMesh > log.blockMesh 2>&1 && {application} > log.{application} 2>&1"
-  default_application: simpleFoam
-  set_entry: 'foamDictionary -entry "{key}" -set "{value}" {section}'
-  environment: |
+run:                                 # how one case is run, in the container
+  type: case_folder                  # inputs are written into the case's files, then the case is run
+  run_script: Allrun                 # run this script if the case has one ...
+  command: "chmod +x Allrun && ./Allrun"
+  command_without_script: "blockMesh > log.blockMesh 2>&1 && {solver} > log.{solver} 2>&1"   # ... else this
+  default_solver: simpleFoam         # when the case doesn't name one
+  set_value_command: 'foamDictionary -entry "{key}" -set "{value}" {section}'
+  setup: |                           # shell lines run first (load the OpenFOAM environment)
     set +u
     for rc in /usr/lib/openfoam/openfoam*/etc/bashrc /opt/openfoam*/etc/bashrc; do
         if [ -f "$rc" ]; then . "$rc"; break; fi
     done
     set -u
-  metrics_args: "--single-case ."
-  metrics_args_fallback: "."
+  metrics_arguments: "--single-case ."   # arguments for the metrics script, if it accepts them
+  metrics_arguments_fallback: "."
 
-llm_notes: |
+notes: |
   Parameters are entries of OpenFOAM case dictionaries: "ini": [section, key]
   is the dictionary file relative to the case (e.g. "constant/MRFProperties")
   and the entry path inside it (e.g. "MRF1/omega").

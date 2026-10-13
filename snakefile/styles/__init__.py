@@ -5,8 +5,9 @@
 """
 snakefile.styles
 
-How a software runs one benchmark case, as named in its software.yaml
-(`snakefile: {style: ...}`). Each style module provides:
+How a software runs one benchmark case, chosen by `run: {type: ...}` in
+its software description (program -> command_line, case_folder ->
+case_files; see software.generic.RUN_TYPES). Each style module provides:
 
   add_arguments(group)                      command-line options of the style
   build_hints(adapter, module_dir, repo)    facts its Snakefile needs, found
@@ -30,5 +31,20 @@ def get_style(name: str) -> ModuleType:
     try:
         return STYLES[name]
     except KeyError:
-        raise SystemExit(f"Error: unknown snakefile style {name!r} in software.yaml; "
-                         f"choose from {', '.join(STYLES)}") from None
+        raise SystemExit("Error: unknown `run: type` in the software description; "
+                         "choose program or case_folder") from None
+
+
+def add_arguments(parser) -> None:
+    """Every style's command-line options, once each."""
+    for name, style in STYLES.items():
+        style.add_arguments(parser.add_argument_group(f"Snakefile options ({name} style)"))
+
+
+def argument_dests() -> list[str]:
+    """Namespace attributes of the styles' options."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    add_arguments(parser)
+    return [action.dest for action in parser._actions]  # noqa: SLF001 -- no public accessor

@@ -5,7 +5,9 @@
 # DuMux / DUNE: a module folder with main.cc + problem.hh, inputs in a DUNE
 # INI file (params.input), metrics written by main.cc as JSON, one
 # params.input per case, a CMake target run with -Section.Key flags.
-# hooks.py adds the older flag-based Snakefile with --mesh-split.
+#
+# Used whenever a run config says `software: DuMux`, and shown to the LLM as
+# an example when it writes a description for another software.
 
 name: DuMux
 input_label: params.input            # how the inputs are called in messages
@@ -13,7 +15,6 @@ display: "{section}.{key}"           # how one input is written: Grid.Cells0
 
 implementation:                      # the folder holding the benchmark
   files: [main.cc, problem.hh]       # ... has all of these
-  pick_option: main-cc               # --main-cc picks one if several are found
 
 cases:
   marker: params.input               # a folder with this file is one case
@@ -48,15 +49,16 @@ executable:
   test_macros: [dumux_add_test, dune_add_test]
   source: main.cc
 
-snakefile:
-  style: command_line
-  container_shared_dir: /dumux/shared
-  build_dir: "{container_root}/{repository}/build-cmake/{module_path}"
+run:                                 # how one case is run, in the container
+  type: program                      # one program, every input passed on its command line
+  results_folder: /dumux/shared      # folder in the container where results are saved
+  working_folder: "{container_root}/{repository}/build-cmake/{implementation_path}"
   command: "./{executable}"
-  input_flag: '-{input} "{value}"'
-  name_input: Problem.Name
+  input_argument: '-{input} "{value}"'
+  output_name_input: Problem.Name    # the input that names the run's output
+  results_zip_name_input: Problem.Name   # the results zip is named after this input
 
-llm_notes: |
+notes: |
   Parameters are entries of a DUNE/DuMux params.input INI file: "ini":
   [section, key] is the INI [Section] and the key (e.g. ["Grid", "Radial0"]).
 

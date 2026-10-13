@@ -5,21 +5,17 @@
 """
 software.generic
 
-The one adapter behind every software.yaml. A software folder only says
-*what* its implementation looks like (which files mark it, where the cases
-are, the input format, where metrics are written, how a case is run); the
-steps themselves are the same for every code and live here, in
-software/sources.py, software/formats/ and snakefile/styles/.
-
-A folder may add a hooks.py for something no setting covers. It can define
-  add_snakefile_arguments(group)              extra Snakefile options
-  render_snakefile(adapter, ctx, style)       replaces the style's render()
+The one adapter behind every software config. A config only says *what*
+an implementation looks like (which files mark it, where the cases are, the
+input format, where metrics are written, how a case is run -- see
+software/template.yaml); the steps themselves are the same for every code
+and live here, in software/sources.py, software/formats/ and
+snakefile/styles/. The config comes from the run config (software.resolve).
 """
 
 from __future__ import annotations
 
 import fnmatch
-import importlib.util
 import re
 import sys
 import zipfile
@@ -37,70 +33,66 @@ from utils import read_text
 
 #: Where zipped template cases are unpacked, inside the implementation folder.
 EXTRACT_DIR = ".benchmantic"
+#: `run.type` in a description -> the Snakefile style (snakefile/styles/).
+RUN_TYPES = {"program": "command_line", "case_folder": "case_files"}
 
 
-def load_spec(path: Path) -> dict[str, Any]:
+def load_spec(path: Path, require_name: bool = True) -> dict[str, Any]:
     try:
         import yaml
     except ImportError:
         sys.exit(f"Error: reading {path} needs PyYAML (pip install pyyaml).")
     spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(spec, dict) or not spec.get("name"):
+    if not isinstance(spec, dict) or (require_name and not spec.get("name")):
         sys.exit(f"Error: {path} must be a YAML mapping with at least a `name`.")
     return spec
 
 
-def _load_hooks(folder: Path) -> ModuleType | None:
-    path = folder / "hooks.py"
-    if not path.is_file():
-        return None
-    module_spec = importlib.util.spec_from_file_location(f"software_hooks_{folder.name}", path)
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
-    return module
+def merge_specs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """`override` on top of `base`, section by section."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_specs(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class GenericAdapter(SoftwareAdapter):
     spec: dict[str, Any] = {}
-    hooks: ModuleType | None = None
-    _folder: Path | None = None
     #: Repository root last seen (label/executable); a fallback for the docs.
     _repo_root: Path | None = None
 
     @classmethod
-    def for_folder(cls, folder: Path) -> type[GenericAdapter]:
-        """An adapter class for software/<folder>/software.yaml."""
-        spec = load_spec(folder / "software.yaml")
+    def from_spec(cls, spec: dict[str, Any], slug: str | None = None) -> type[GenericAdapter]:
+        """An adapter class for a software config."""
+        slug = slug or re.sub(r"[^0-9a-z]+", "-", str(spec["name"]).lower()).strip("-") or "software"
         selection = (spec.get("inputs") or {}).get("default_selection") or {}
         attrs = {
             "spec": spec,
-            "hooks": _load_hooks(folder),
-            "_folder": folder,
             "name": spec["name"],
-            "slug": folder.name,
+            "slug": slug,
             "input_label": spec.get("input_label", f"the {spec['name']} input files"),
             "default_selection_label": selection.get("label", "all parameters"),
-            "default_container_shared_dir": (spec.get("snakefile") or {}).get("container_shared_dir"),
+            "default_container_shared_dir": (spec.get("run") or {}).get("results_folder"),
         }
         class_name = re.sub(r"\W", "", spec["name"]) + "Adapter"
         return type(class_name, (cls,), attrs)
 
     # --- settings ---------------------------------------------------------------
     @classmethod
-    def folder(cls) -> Path:
-        return cls._folder
-
-    @classmethod
     def _section(cls, key: str) -> dict[str, Any]:
         return cls.spec.get(key) or {}
 
     @property
-    def snakefile_settings(self) -> dict[str, Any]:
-        return self._section("snakefile")
+    def run_settings(self) -> dict[str, Any]:
+        """The description's `run:` section (how one case is run)."""
+        return self._section("run")
 
     @classmethod
     def style(cls) -> ModuleType:
-        return get_style(cls._section("snakefile").get("style", "command_line"))
+        return get_style(RUN_TYPES.get(cls._section("run").get("type", "program"), "unknown"))
 
     @property
     def _format(self) -> ModuleType:
@@ -164,7 +156,7 @@ class GenericAdapter(SoftwareAdapter):
 
     def find_parameter_files(self, module_dir: Path) -> None:
         """Step: search for the parameter file. Runs once per module. With
-        `inputs.search` set in software.yaml and no file of the configured
+        `inputs.search` set in the software description and no file of the configured
         name present, the best file found (see software/param_files.py)
         replaces the configured name -- as the input file and, when the two
         are the same file, as the case marker too."""
@@ -246,24 +238,20 @@ class GenericAdapter(SoftwareAdapter):
         probe = cls()
         return probe._is_case(root) or bool(probe._case_dirs_under(root)) or bool(probe._zips_under(root))
 
-    @classmethod
-    def _pick_option(cls) -> str | None:
-        return cls._section("implementation").get("pick_option")
-
     def find_module_dir(self, root: Path, args: Any) -> Path:
+        folder = self._section("implementation").get("folder")
+        if folder:
+            path = root / folder
+            if not path.is_dir():
+                sys.exit(f"Error: implementation.folder {folder} does not exist under {root}")
+            return path
         files = self._files()
         if files:
-            option = self._pick_option()
-            picked = getattr(args, option.replace("-", "_"), None) if option else None
-            if picked is not None:
-                if not Path(picked).exists():
-                    sys.exit(f"--{option} {picked} does not exist")
-                return Path(picked).parent
             if self._has_files(root):
                 return root
             candidates = self._folders_with_files(root)
             what = " + ".join(files)
-            hint = f"Pass --{option} to pick one, or point" if option else "Point"
+            hint = "Set implementation.folder in the software config, or point"
             if not candidates:
                 sys.exit(f"Error: could not find a benchmark module (a directory containing {what}) anywhere "
                          f"under {root}.\n{hint} module_dir directly at it, or double-check the path.")
@@ -383,26 +371,10 @@ class GenericAdapter(SoftwareAdapter):
     def build_hints(self, module_dir: Path, repo_root: Path) -> dict[str, Any]:
         return self.style().build_hints(self, module_dir, repo_root)
 
-    # --- command-line options and workflow -------------------------------------------------
-    @classmethod
-    def add_arguments(cls, group) -> None:
-        option = cls._pick_option()
-        if option:
-            files = cls._files()
-            group.add_argument(f"--{option}", type=Path, default=None, dest=option.replace("-", "_"),
-                               help=f"Explicit path to {files[0]}, only needed if more than one "
-                                    f"{'+'.join(files)} pair is found under module_dir.")
-
-    @classmethod
-    def add_snakefile_arguments(cls, group) -> None:
-        if cls.hooks and hasattr(cls.hooks, "add_snakefile_arguments"):
-            cls.hooks.add_snakefile_arguments(group)
-
+    # --- workflow ---------------------------------------------------------------------------
     def render_snakefile(self, ctx: SnakefileContext) -> SnakefileResult:
-        if self.hooks and hasattr(self.hooks, "render_snakefile"):
-            return self.hooks.render_snakefile(self, ctx, self.style())
         return self.style().render(self, ctx)
 
     # --- LLM context ---------------------------------------------------------------------------
     def prompt_context(self) -> str:
-        return str(self.spec.get("llm_notes") or "").strip()
+        return str(self.spec.get("notes") or "").strip()
