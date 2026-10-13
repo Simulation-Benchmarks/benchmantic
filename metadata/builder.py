@@ -47,6 +47,7 @@ from metadata.parameters import build_parameter_fields
 from metadata import mardi
 import software
 from software import SOFTWARE_CHOICES, get_adapter
+from metadata.croissant import build_croissant, write_croissant
 from metadata.mapping import (
     InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
     neutral_name, render, template_consistency,
@@ -1314,7 +1315,13 @@ def add_semantic_override_args(ap) -> None:
 
 
 def add_mapping_args(ap) -> None:
-    """--reference-benchmark / --parameter-names, shared with describe_benchmark.py."""
+    """--reference-benchmark / --parameter-names / --croissant-anchor, shared with describe_benchmark.py."""
+    ap.add_argument("--croissant-anchor", choices=["key", "line", "none"], default="key",
+                    help="Also write <name>_croissant.json: each parameter as a Croissant 1.1 field with its "
+                         "location in the parameter file and the extract/transform steps that read its value. "
+                         "The transform regex finds the value by section and key ('key', default; works on "
+                         "every case file) or by line and column ('line'; exact for the template file). "
+                         "'none' skips the file.")
     ap.add_argument("--reference-benchmark", type=Path, default=None, metavar="JSONLD",
                     help="An existing description of the same benchmark to map onto. Default: looked "
                          "for automatically -- a benchmark description in the repository (e.g. "
@@ -1914,6 +1921,14 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         mapping.write(mapping_path)
         if args.verbose:
             print(f"Wrote {mapping_path}")
+
+    anchor = getattr(args, "croissant_anchor", "key")
+    if anchor != "none":
+        croissant_path = args.output.with_name(args.output.stem + ".croissant.json")
+        write_croissant(build_croissant(adapter, module_dir, raw_candidates, filtered_parameter_fields,
+                                        manifest, anchor, base_dir=croissant_path.parent), croissant_path)
+        if args.verbose:
+            print(f"Wrote {croissant_path}")
 
     doc = {"@context": DEFAULT_CONTEXT, "@graph": builder.graph}
     args.output.write_text(json.dumps(doc, indent=2), encoding="utf-8")

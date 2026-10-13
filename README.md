@@ -22,6 +22,9 @@ describe_benchmark.py
         ├─▶ <name>_mapping.json
         │     benchmark parameters -> this software's
         │     inputs (expressions, checks)
+        ├─▶ <name>_croissant.json
+        │     Croissant 1.1: each parameter's location in
+        │     the parameter file + extract/transform steps
         └─▶ Snakefile
               plain file, container-ready
 
@@ -38,6 +41,7 @@ workflow.py runs all of the above in one command
 
 - Works from a local checkout or a remote source alike: `<module_dir>` accepts a local folder path, or a GitHub/GitLab/any git-reachable URL, cloned into a throwaway temp directory that's deleted once the run finishes (pass `--keep-clone` to reuse a persistent local clone across runs instead).
 - Discovers input parameters and output metrics directly from source -- for DuMux `params.input`, `main.cc`, `problem.hh`; for OpenFOAM the case dictionaries (`system/`, `constant/`, `0/`, including template placeholders like `{omega}`) and the post-processing script that writes `solution_metrics.json` -- plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`. See [Supported software and parameter names](#supported-software-and-parameter-names).
+- Finds the parameter file even when it isn't named as configured: with `inputs.search` in `software/<name>/software.yaml`, candidate files matching its patterns are read with the input format and ranked (named in the source code first, then the configured name, then the most entries); the run prints which file it picked and why. Every parameter keeps its location in that file (`file`, `line`, `column`, and the column span of each value token), shown with `--verbose` and written to `<name>_mapping.json` as `location`.
 - Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in a compact `getParam<Type>()` call-site excerpt from the C++ source (not the raw config key name alone, and not the whole file). Three layers keep this within a provider's tokens-per-minute budget instead of relying on retries after the fact: requests are estimated and batched below both an item-count cap (`--inference-batch-size`) and a token-size target (`--inference-tpm-budget`), and every request reserves its estimated cost against one shared budget across the whole run so a burst of small requests can't collectively exceed it either.
 - Parameter selection: which discovered `params.input` entries actually go into the run. On a real terminal, a wide enough window (100+ columns) and a long enough list (more than a dozen candidates -- the motivating case is a benchmark with 30+ parameters) show a two-column checkbox screen: items numbered straight down the left column, then continuing down the right (e.g. 1-19 left, 20-38 right for 38 parameters) instead of one long list you'd otherwise have to scroll all the way through, with a live "Selected N/total" badge in the top corner and a running list of exactly what's checked, by name, at the bottom. `↑`/`↓` move within the current column and wrap there, `Tab` (or `←`/`→`) hops the highlight to the matching row in the other column, Space toggles, and typing a number jumps straight to that item wherever it lands, same as elsewhere in this tool. A shorter list or a narrower terminal uses a single scrolling column instead (the same layout the Outputs step's own small "Custom" toggle screen always uses) -- a mostly-empty second column would just look broken for a handful of items. Falls back to a plain-text "type index numbers to toggle" table when curses isn't usable at all.
 - Interactive review step: before anything is built into the graph, parameters AND metrics go through one combined review pass. On a real terminal, this is a curses screen showing only the items that actually need a look (low confidence, or a structural flag unrelated to the AI's own confidence) — everything else is auto-accepted and just counted, with Accept/Rename/Change unit/Change type/Change quantity kind/Edit explanation per item, chosen with arrow keys or a single digit press (`1`-`7`); falls back automatically to a plain-text table (same idea, `--skip-review`-friendly) when curses isn't usable (no real TTY, e.g. piped/CI output) or you back out of it with `q`.
@@ -51,6 +55,33 @@ workflow.py runs all of the above in one command
 - Renders the generated description as human-readable Markdown tables for manual review (merging in the sidecar dataset file automatically), with confidence scores and unit/quantityKind mix-ups flagged.
 - Validates the generated benchmark description against the SHACL shapes shipped with `semantic_benchmark` (`BenchmarkLoader.load_shapes()`), then loads it with the real `semantic_benchmark.BenchmarkLoader` for the runtime checks the shapes can't express.
 - Ships a single `workflow.py` command that runs the whole pipeline and mirrors the verification step's exit code, so it's CI-safe.
+
+## Croissant description of the parameters
+
+Next to the mapping, `describe_benchmark.py` writes `<name>_croissant.json`: the benchmark's parameters in [Croissant 1.1](https://docs.mlcommons.org/croissant/docs/croissant-spec-1.1.html) (MLCommons). Each parameter file is a `cr:FileObject` (path, `sha256`), and each parameter a `cr:Field` whose `source` says how to get its value:
+
+```json
+{
+  "@type": "cr:Field", "@id": "params_input/outer_radius", "name": "outer_radius",
+  "dataType": "sc:Float",
+  "source": {
+    "fileObject": {"@id": "params.input"},
+    "extract": {"fileProperty": "content"},
+    "transform": [{"regex": "(?ms)\\A.*?^[ \\t]*\\[Grid\\]...Radial0[ \\t]*[=:][ \\t]*(?:[^\\s#]+[ \\t]+){2}([^\\s#]+)"}]
+  },
+  "bm:input": "Grid.Radial0",
+  "bm:location": {"bm:file": "params.input", "bm:line": 2, "bm:column": 19, "bm:endColumn": 22},
+  "bm:tokenIndex": 2,
+  "bm:unit": "unit:M"
+}
+```
+
+- **extract** reads the file's text; **transform** is a regex whose one capture group is the value (followed by `{"separator": " "}` for a parameter that is a list of values, marked `isArray`).
+- `--croissant-anchor key` (default) finds the value by section and key, so the same field reads every case file; `--croissant-anchor line` finds it by line and column (exact for the template file, and it still checks the key is on that line); `none` skips the file.
+- Each file's `contentUrl` is relative to the description's own folder, as Croissant resolves it.
+- Croissant has no property for a line or column, so the location is also written in benchmantic's own terms (`bm:` = `https://github.com/Simulation-Benchmarks/benchmantic#`), with the software's input name and the QUDT unit.
+
+Without an LLM key, `python3 croissant_description.py <module_dir> --check` writes the same description for all discovered parameters (named from section and key) to `outputs/<software>/parameters_croissant.json` in the benchmantic folder (`-o` to change) and prints each value read back through its extract/transform steps. The file validates with `mlcroissant`; note that `mlcroissant` 1.1.1 reads a text file's `content` as bytes, so its `records()` can't run a text regex on it -- `metadata.croissant.extract_values()` applies the steps as the spec defines them.
 
 ## Installation
 

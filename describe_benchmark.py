@@ -121,6 +121,7 @@ import show_description  # noqa: E402
 import snakefile.generator as generator  # noqa: E402
 import software  # noqa: E402
 from metadata.graph import load_graph  # noqa: E402
+from metadata.croissant import relocate as relocate_croissant, write_croissant  # noqa: E402
 
 REQUIRED_FLAGS = ("module_dir", "container_image", "container_shared_dir")
 
@@ -160,6 +161,11 @@ def mapping_filename_for(benchmark_filename: str) -> str:
     stem = Path(benchmark_filename).stem
     stem = stem[: -len("_benchmark")] if stem.endswith("_benchmark") else stem
     return f"{stem}_mapping.json"
+
+
+def croissant_filename_for(benchmark_filename: str) -> str:
+    """'rotating_cylinders_benchmark.jsonld' -> 'rotating_cylinders_croissant.json'."""
+    return mapping_filename_for(benchmark_filename).replace("_mapping.json", "_croissant.json")
 
 
 def derive_dataset_filename(by_id: dict) -> str:
@@ -561,6 +567,21 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         shutil.move(str(staged_mapping), str(mapping_path))
         if args.verbose or args.debug:
             print(f"-> Wrote {mapping_path}")
+
+    # Croissant description of the parameters: where each one is in the
+    # parameter file and how to extract it (see metadata.croissant).
+    staged_croissant = staging_dir / "staged.croissant.json"
+    croissant_path: Path | None = None
+    if staged_croissant.exists():
+        croissant_path = output_dir / croissant_filename_for(benchmark_filename)
+        # its file paths are relative to where it is: re-point them from
+        # the staging folder to the output folder
+        croissant_doc = json.loads(staged_croissant.read_text(encoding="utf-8"))
+        relocate_croissant(croissant_doc, staging_dir, output_dir)
+        write_croissant(croissant_doc, croissant_path)
+        staged_croissant.unlink()
+        if args.verbose or args.debug:
+            print(f"-> Wrote {croissant_path}")
     shutil.rmtree(staging_dir, ignore_errors=True)
 
     # 2. Snakefile -- generated into a throwaway workdir alongside the
@@ -614,7 +635,7 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
-    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, snakefile_path, review_path)
+    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, croissant_path, snakefile_path, review_path)
                       if p is not None]
     _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path
