@@ -12,7 +12,45 @@ dicts built from LLM-inferred (or cached) metadata.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+
+from dataclasses import asdict, dataclass, field
+
+
+@dataclass
+class ParameterLocation:
+    """Where one parameter sits inside its input file. Lines and columns
+    are 1-based; columns count characters on that line."""
+    #: The input file, relative to the case folder (e.g. "params.input",
+    #: "constant/MRFProperties").
+    file: str
+    #: Line of the key.
+    line: int
+    #: Column where the value starts on that line.
+    column: int
+    #: (start column, end column) of each value token, end exclusive --
+    #: so a multi-value entry like "Radial0 = 1.0 1.5 2.0" can point at
+    #: the one token a parameter uses (its "index").
+    token_spans: list[tuple[int, int]] = field(default_factory=list)
+
+    def to_json(self) -> dict:
+        d = asdict(self)
+        d["token_spans"] = [list(span) for span in self.token_spans]
+        return d
+
+
+def token_spans(line_text: str, value_start: int, value: str) -> list[tuple[int, int]]:
+    """1-based (start, end) columns of the whitespace-separated tokens of
+    `value`, found on `line_text` from 0-based offset `value_start`.
+    Parentheses are skipped, like the readers' own tokenisation."""
+    spans = []
+    for m in re.finditer(r"[^\s()]+", value):
+        start = line_text.find(m.group(), value_start)
+        if start < 0:
+            break
+        spans.append((start + 1, start + 1 + len(m.group())))
+        value_start = start + len(m.group())
+    return spans
 
 
 @dataclass
@@ -31,6 +69,9 @@ class ParameterCandidate:
     #: embedding whole source files in every inference request (which used
     #: to dominate prompt size and exceed provider per-request limits).
     code_context: str = ""
+    #: Where the parameter was found in its input file (None if the
+    #: reader can't tell).
+    location: ParameterLocation | None = None
 
 
 

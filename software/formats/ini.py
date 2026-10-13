@@ -11,15 +11,18 @@ tokens are its whitespace-separated parts.
 
 Settings in software.yaml (under `inputs:`):
   files: [params.input]     the input file(s) in each case folder
+  search: {...}             find the file if it isn't called that
+                            (see software/param_files.py)
 """
 
 from __future__ import annotations
 
 import configparser
+import re
 from pathlib import Path
 from typing import Any
 
-from metadata.parameters import ParameterCandidate
+from metadata.parameters import ParameterCandidate, ParameterLocation, token_spans
 from utils import to_number
 
 
@@ -31,6 +34,44 @@ def parse(path: Path) -> dict[str, dict[str, str]]:
     return {section: dict(cp.items(section)) for section in cp.sections()}
 
 
+_SECTION_LINE = re.compile(r"^\s*\[([^\]]+)\]")
+_KEY_LINE = re.compile(r"^\s*([^=:#;\[\s][^=:]*?)\s*[=:]\s*")
+
+
+def locate(path: Path, case_dir: Path | None = None) -> dict[tuple[str, str], ParameterLocation]:
+    """{(section, key): where it is} for one INI file. Reads the lines
+    itself, because configparser doesn't keep positions. A key set twice
+    keeps its last position, as configparser keeps its last value."""
+    rel = str(path.relative_to(case_dir)) if case_dir else path.name
+    found: dict[tuple[str, str], ParameterLocation] = {}
+    section = None
+    for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if text.lstrip().startswith(("#", ";")):
+            continue
+        m = _SECTION_LINE.match(text)
+        if m:
+            section = m.group(1).strip()
+            continue
+        m = _KEY_LINE.match(text)
+        if m and section is not None:
+            value = text[m.end():].split("#", 1)[0].rstrip()
+            found[(section, m.group(1).strip())] = ParameterLocation(
+                file=rel, line=number, column=m.end() + 1, token_spans=token_spans(text, m.end(), value))
+    return found
+
+
+def sniff(path: Path) -> int:
+    """How many entries `path` holds if it reads as an INI file with at
+    least one [Section] and one key = value; 0 if it isn't one."""
+    try:
+        if path.stat().st_size > 1_000_000:
+            return 0
+        sections = parse(path)
+    except (OSError, UnicodeDecodeError, configparser.Error):
+        return 0
+    return sum(len(kv) for kv in sections.values())
+
+
 def _files(settings: dict[str, Any]) -> list[str]:
     return list(settings.get("files") or [])
 
@@ -40,12 +81,14 @@ def input_files(case_dir: Path, settings: dict[str, Any]) -> list[Path]:
 
 
 def discover(case_dir: Path, settings: dict[str, Any]) -> list[ParameterCandidate]:
-    return [
-        ParameterCandidate(section=section, key=key, value=value, tokens=value.split())
-        for path in input_files(case_dir, settings)
-        for section, kv in parse(path).items()
-        for key, value in kv.items()
-    ]
+    candidates = []
+    for path in input_files(case_dir, settings):
+        where = locate(path, case_dir)
+        for section, kv in parse(path).items():
+            for key, value in kv.items():
+                candidates.append(ParameterCandidate(section=section, key=key, value=value, tokens=value.split(),
+                                                     location=where.get((section, key))))
+    return candidates
 
 
 def _merged(case_dir: Path, settings: dict[str, Any]) -> dict[str, dict[str, str]]:

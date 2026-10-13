@@ -30,7 +30,7 @@ from typing import Any
 from metadata.metrics import METRICS_FILE_NAME, MetricCandidate, discover_metrics, discover_metrics_in_python
 from metadata.parameters import ParameterCandidate
 from snakefile.styles import get_style
-from software import sources
+from software import param_files, sources
 from software.base import SnakefileContext, SnakefileResult, SoftwareAdapter
 from software.formats import get_format
 from utils import read_text
@@ -107,18 +107,17 @@ class GenericAdapter(SoftwareAdapter):
         return get_format(self._section("inputs").get("format", "ini"))
 
     # --- cases ---------------------------------------------------------------------
-    @classmethod
-    def _marker(cls) -> tuple[str, ...]:
-        return Path(cls._section("cases")["marker"]).parts
+    def _marker(self) -> tuple[str, ...]:
+        """The file marking a case: the configured one, or the parameter
+        file found by search when the configured one isn't there."""
+        return getattr(self, "_found_marker", None) or Path(self._section("cases")["marker"]).parts
 
-    @classmethod
-    def _is_case(cls, folder: Path) -> bool:
-        return folder.joinpath(*cls._marker()).is_file()
+    def _is_case(self, folder: Path) -> bool:
+        return folder.joinpath(*self._marker()).is_file()
 
-    @classmethod
-    def _case_dirs_under(cls, root: Path) -> list[Path]:
+    def _case_dirs_under(self, root: Path) -> list[Path]:
         """Folders holding the case marker, in the order of the marker paths."""
-        parts = cls._marker()
+        parts = self._marker()
         found = []
         for p in sorted(root.rglob(parts[-1])):
             if p.parts[-len(parts):] == parts and EXTRACT_DIR not in p.parts:
@@ -127,20 +126,18 @@ class GenericAdapter(SoftwareAdapter):
                     found.append(case_dir)
         return found
 
-    @classmethod
-    def _zip_has_case(cls, path: Path) -> bool:
-        marker = "/".join(cls._marker())
+    def _zip_has_case(self, path: Path) -> bool:
+        marker = "/".join(self._marker())
         try:
             with zipfile.ZipFile(path) as zf:
                 return any(n.rstrip("/").endswith(marker) for n in zf.namelist())
         except (zipfile.BadZipFile, OSError):
             return False
 
-    @classmethod
-    def _zips_under(cls, root: Path) -> list[Path]:
-        if not cls._section("cases").get("zips"):
+    def _zips_under(self, root: Path) -> list[Path]:
+        if not self._section("cases").get("zips"):
             return []
-        return sorted(p for p in root.rglob("*.zip") if EXTRACT_DIR not in p.parts and cls._zip_has_case(p))
+        return sorted(p for p in root.rglob("*.zip") if EXTRACT_DIR not in p.parts and self._zip_has_case(p))
 
     def case_zips(self, module_dir: Path) -> list[Path]:
         return self._zips_under(module_dir)
@@ -160,7 +157,44 @@ class GenericAdapter(SoftwareAdapter):
         return next((p.parents[depth] for p in sorted(target.rglob(self._marker()[-1]))
                      if self._is_case(p.parents[depth])), target)
 
+    # --- the parameter file -----------------------------------------------------------
+    def _code_texts(self, module_dir: Path) -> list[str]:
+        names = list(self._files()) + list((self._section("inputs").get("code_hints") or {}).get("files") or [])
+        return [read_text(module_dir / n) for n in dict.fromkeys(names) if (module_dir / n).is_file()]
+
+    def find_parameter_files(self, module_dir: Path) -> None:
+        """Step: search for the parameter file. Runs once per module. With
+        `inputs.search` set in software.yaml and no file of the configured
+        name present, the best file found (see software/param_files.py)
+        replaces the configured name -- as the input file and, when the two
+        are the same file, as the case marker too."""
+        if getattr(self, "_searched_in", None) == module_dir:
+            return
+        self._searched_in = module_dir
+        self._found_marker = None
+        self._input_overrides: dict[str, Any] = {}
+        self.parameter_files: list[param_files.FoundFile] = []
+        inputs = self._section("inputs")
+        search = inputs.get("search")
+        if not search or not hasattr(self._format, "sniff"):
+            return
+        configured = [str(f) for f in inputs.get("files") or []]
+        self.parameter_files = param_files.find_parameter_files(
+            module_dir, self._format, search, self._code_texts(module_dir), configured)
+        if not self.parameter_files or self._is_case(module_dir) or self._case_dirs_under(module_dir):
+            return  # the configured file is there: nothing to replace
+        best = self.parameter_files[0].path
+        self._input_overrides = {"files": [best.name]}
+        if Path(self._section("cases").get("marker", "")).name in configured:
+            self._found_marker = (best.name,)
+
+    def input_settings(self, module_dir: Path) -> dict[str, Any]:
+        """The `inputs:` settings, with a searched-for file name applied."""
+        self.find_parameter_files(module_dir)
+        return {**self._section("inputs"), **self._input_overrides}
+
     def discover_cases(self, module_dir: Path) -> list[tuple[Path, str]]:
+        self.find_parameter_files(module_dir)
         settings = self._section("cases")
         if not settings.get("nested") and self._is_case(module_dir):
             return [(module_dir, module_dir.name)]
@@ -186,6 +220,7 @@ class GenericAdapter(SoftwareAdapter):
     def template_case(self, module_dir: Path) -> Path:
         """The case whose inputs are discovered: the implementation folder
         itself if it is a case, else the first case found."""
+        self.find_parameter_files(module_dir)
         if self._is_case(module_dir):
             return module_dir
         return self.discover_cases(module_dir)[0][0]
@@ -208,7 +243,8 @@ class GenericAdapter(SoftwareAdapter):
     def detect(cls, root: Path) -> bool:
         if cls._files():
             return cls._has_files(root) or any(cls._has_files(p.parent) for p in root.rglob(cls._files()[0]))
-        return cls._is_case(root) or bool(cls._case_dirs_under(root)) or bool(cls._zips_under(root))
+        probe = cls()
+        return probe._is_case(root) or bool(probe._case_dirs_under(root)) or bool(probe._zips_under(root))
 
     @classmethod
     def _pick_option(cls) -> str | None:
@@ -259,13 +295,15 @@ class GenericAdapter(SoftwareAdapter):
             names = set(wanted.get("input_files_named") or [])
             case_dir = self.template_case(module_dir)
             return {str(p.relative_to(case_dir)): read_text(p)
-                    for p in self._format.input_files(case_dir, self._section("inputs"))
+                    for p in self._format.input_files(case_dir, self.input_settings(module_dir))
                     if p.name in names}
         return {name: read_text(module_dir / name) for name in wanted}
 
     # --- inputs ---------------------------------------------------------------------
     def discover_parameters(self, module_dir: Path) -> list[ParameterCandidate]:
-        settings = self._section("inputs")
+        """Step: identify the parameters in the parameter file, each with
+        its location in that file (ParameterCandidate.location)."""
+        settings = self.input_settings(module_dir)
         candidates = self._format.discover(self.template_case(module_dir), settings)
         hints = settings.get("code_hints")
         if hints:
@@ -288,7 +326,8 @@ class GenericAdapter(SoftwareAdapter):
         return chosen or list(candidates)
 
     def resolve_case_params(self, case_dir: Path, parameter_fields: dict[str, Any]) -> dict[str, Any]:
-        return self._format.resolve(case_dir, parameter_fields, self._section("inputs"))
+        settings = {**self._section("inputs"), **getattr(self, "_input_overrides", {})}
+        return self._format.resolve(case_dir, parameter_fields, settings)
 
     def input_display(self, section: str, key: str) -> str:
         return self.spec.get("display", "{section}:{key}").format(section=section, key=key)

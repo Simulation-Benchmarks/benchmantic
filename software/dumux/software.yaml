@@ -25,6 +25,9 @@ sources: [problem.hh, main.cc]       # read for license, name and description
 inputs:
   format: ini
   files: [params.input]
+  search:                            # no params.input? look for the parameter file
+    patterns: ["*.input", "*.ini", "*.prm"]
+    max_depth: 2
   default_selection:                 # pre-selected as case-varying
     sections: [domain, grid, problem]
     label: "parameters under [domain, grid, problem]"

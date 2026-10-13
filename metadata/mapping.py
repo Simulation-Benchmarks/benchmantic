@@ -153,6 +153,8 @@ class InputMapping:
     confidence: float | None = None
     explanation: str = ""
     placeholder: str | None = None   # OpenFOAM template placeholder name, if any
+    #: Where the input is in its file: {"file", "line", "column", "token_spans"}.
+    location: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         d = {"input": self.display, "section": self.section, "key": self.key, "expression": self.expression}
@@ -162,6 +164,8 @@ class InputMapping:
             d["placeholder"] = self.placeholder
         if self.template_value:
             d["template_value"] = self.template_value
+        if self.location:
+            d["location"] = self.location
         if self.confidence is not None:
             d["confidence"] = self.confidence
         if self.explanation:

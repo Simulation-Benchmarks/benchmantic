@@ -35,6 +35,9 @@ inputs:
   format: ini                        # a reader in software/formats/: ini | foam_dict
   files: [parameters.ini]            # ini: the input file(s) of a case
   # folders: [system, constant, "0"] # foam_dict: case sub-folders with inputs
+  # search:                          # find the parameter file if it isn't named
+  #   patterns: ["*.input", "*.ini"] # like `files`: candidates are read with the
+  #   max_depth: 3                   # format, ranked by being named in the code
   default_selection:                 # pre-selected as case-varying (step 2)
     sections: ["*"]                  # section names or patterns
     # placeholders_first: true       # prefer inputs written as "{name}"

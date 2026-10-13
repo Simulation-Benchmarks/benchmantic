@@ -1568,6 +1568,9 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
         print(f"  {'✓' if readme_path else '○'} README" + ("" if readme_path else " (not found)"))
         print(f"  {'✓' if executable_name else '○'} Executable" + ("" if executable_name else " (not found)"))
         print(f"  ✓ Parameters ({len(raw_candidates)} found in {adapter.input_label})")
+        _print_parameter_files(adapter, module_dir, raw_candidates)
+    else:
+        _print_parameter_files(adapter, module_dir, raw_candidates, verbose=True)
 
     # 2b. Enrich candidates with getParam<Type>("Section.Key") call-site hints
     #     scraped from main.cc/problem.hh -- e.g. "Component.LiquidDensity" ->
@@ -2076,6 +2079,7 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
             section=c.section, key=c.key, display=adapter.input_display(c.section, c.key),
             expression=a.get("expression"), template_value=c.value, confidence=a.get("confidence"),
             explanation=a.get("explanation", ""), placeholder=_placeholder_of(c),
+            location=c.location.to_json() if c.location else None,
         ))
 
     _flag_unit_mismatches(result, semantic_by_key, reference)
@@ -2086,6 +2090,27 @@ def _map_to_reference(args, module_dir: Path, adapter, candidates, reference, be
                                                "confidence": m.confidence, "explanation": m.explanation}
     cache_file.write_text(json.dumps({"reference_parameters": names, "items": items}, indent=2), encoding="utf-8")
     return result
+
+
+def _print_parameter_files(adapter: Any, module_dir: Path, candidates: list, verbose: bool = False) -> None:
+    """Which parameter file(s) the parameters came from and -- with
+    --verbose -- where in the file each one is."""
+    files = sorted({c.location.file for c in candidates if c.location})
+    found = getattr(adapter, "parameter_files", None) or []
+    used = {Path(f).name for f in files}
+    for f in found:
+        rel = f.path.relative_to(module_dir) if f.path.is_relative_to(module_dir) else f.path
+        mark = "✓" if f.path.name in used else "○"
+        note = "" if mark == "✓" else " (not used)"
+        print(f"    {mark} {rel}: {', '.join(f.reasons)}{note}")
+    if not found and files:
+        print(f"    ✓ {', '.join(files)}")
+    if verbose:
+        for c in candidates:
+            if c.location:
+                loc = c.location
+                print(f"      {adapter.input_display(c.section, c.key)} = {c.value!r}  "
+                      f"[{loc.file}:{loc.line}:{loc.column}]")
 
 
 def _unit_id(unit: str | None) -> str:
@@ -2223,6 +2248,7 @@ def _build_mapping(args, adapter, reference, fields: dict[str, Any], raw_candida
             section=section, key=key, display=adapter.input_display(section, key),
             expression=identity_expression(spec["label"], template, spec.get("index"), bool(spec.get("full_value"))),
             template_value=template, placeholder=_placeholder_of(c) if c else None,
+            location=c.location.to_json() if c and c.location else None,
         ))
     return ParameterMapping(
         software=adapter.name, inputs=inputs,

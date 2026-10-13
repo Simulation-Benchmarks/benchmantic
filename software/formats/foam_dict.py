@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from metadata.parameters import ParameterCandidate
+from metadata.parameters import ParameterCandidate, ParameterLocation, token_spans
 from utils import read_text, to_number
 
 PLACEHOLDER_PATTERN = re.compile(r"^\{(\w+)\}$")
@@ -190,6 +190,20 @@ def read_foam_dict(path: Path) -> list[FoamEntry]:
         return []
 
 
+def _location(section: str, entry: FoamEntry, lines: list[str]) -> ParameterLocation:
+    text = lines[entry.line - 1] if 0 < entry.line <= len(lines) else ""
+    name = entry.path.split("/")[-1]
+    m = re.search(r"(?<![\w$])" + re.escape(name) + r"\s+", text)
+    start = m.end() if m else 0
+    return ParameterLocation(file=section, line=entry.line, column=start + 1,
+                             token_spans=token_spans(text, start, entry.value))
+
+
+def sniff(path: Path) -> int:
+    """Number of entries if `path` is an OpenFOAM dictionary, else 0."""
+    return len(read_foam_dict(path)) if is_foam_dict(path) else 0
+
+
 def is_foam_dict(path: Path) -> bool:
     """True for OpenFOAM dictionary files (FoamFile header near the top)."""
     try:
@@ -280,7 +294,7 @@ def discover(case_dir: Path, settings: dict[str, Any]) -> list[ParameterCandidat
                 hint = f"OpenFOAM dictionary {section}, entry {entry.path}"
             candidates.append(ParameterCandidate(
                 section=section, key=entry.path, value=entry.value, tokens=entry.tokens,
-                cpp_hint=hint, code_context=context,
+                cpp_hint=hint, code_context=context, location=_location(section, entry, lines),
             ))
     return candidates
 
