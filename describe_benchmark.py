@@ -208,7 +208,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="Path to the benchmark module (or a repo checkout containing it) -- "
                           "anything metadata.builder can already handle. Also accepts a GitHub/GitLab/"
                           "any git-reachable URL (https://..., git://..., or an scp-like git@host:path "
-                          "spec); by default it's cloned into a throwaway temp directory that's deleted "
+                          "spec), or a link to a file or folder as the browser shows it "
+                          "(.../blob/<branch>/<path>, .../tree/<branch>/<path>), or a local file path; "
+                          "by default it's cloned into a throwaway temp directory that's deleted "
                           "once this run finishes -- see --keep-clone/--ref/--clone-dir/--fresh-clone. "
                           "Required, but may instead come from a 'module_dir:' key in --config.")
     ap.add_argument("--config", type=Path, default=None,

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# FEniCSx (DOLFINx): a benchmark written as one Python script or Jupyter
+# notebook -- e.g. chapter2/ns_code2.ipynb of the DOLFINx tutorial (DFG 2D-3,
+# flow around a cylinder). The inputs are numbers in the code, the metrics
+# values the code computes; nothing in the repository has to change. Point
+# the run config at the file: implementation: https://github.com/<org>/<repo>/blob/main/<path>/<script>
+#
+# Used whenever a run config says `software: FEniCSx`, and shown to the LLM
+# as an example when it writes a description for another software.
+
+name: FEniCSx
+input_label: the constants in the code
+display: "{key}"                     # how one input is written: mu
+
+# no `implementation` and `cases`: the linked file is the implementation and
+# its one case
+
+sources: []                          # license, name and description: the file and the README
+
+inputs:
+  format: python                     # top-level constants in the code: r = 0.05, dt = 1 / 1600,
+                                     # mu = Constant(mesh, PETSc.ScalarType(0.001))
+  default_selection:
+    sections: ["*"]
+    label: all constants in the code
+
+metrics:
+  from: variables                    # values of the code's variables when it ends; without
+                                     # `values`: printed values, and arrays filled in a loop
+
+label: main_file                     # the notebook's first "# Title" (else the README's)
+description: main_file
+executable:
+  from: none
+
+run:
+  type: script                       # a copy of the code, with the case's values, is run
+  command: "python3 {script}"
+
+notes: |
+  Parameters are top-level constants in the benchmark's Python code: "ini":
+  [section, key] is the file (e.g. "ns_code2.ipynb") and the constant's name
+  (e.g. "mu"). "cpp_hint" says where it is (notebook cell) and whether the
+  number sits inside a call such as Constant(mesh, PETSc.ScalarType(0.001));
+  "code_context" shows the code around it and where it is used. The codes
+  are usually in SI or nondimensional units: `mu` is a dynamic viscosity
+  (Pa*s), `rho` a density (kg/m3), `nu` a kinematic viscosity (m2/s), `dt` a
+  time step and `T` an end time (s), `r`, `L`, `H` lengths (m). Small
+  integers passed to element(...) are polynomial degrees; markers, ranks and
+  dimensions (gdim) are not physical quantities.

@@ -21,11 +21,12 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from software.formats import foam_dict, ini
+from software.formats import foam_dict, ini, python_code
 
 FORMATS: dict[str, ModuleType] = {
     "ini": ini,
     "foam_dict": foam_dict,
+    "python": python_code,
 }
 
 

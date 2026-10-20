@@ -154,7 +154,7 @@ verbose: true
 
 | Key | Meaning |
 |---|---|
-| `implementation` | your benchmark code: a folder, or a git URL (required) |
+| `implementation` | your benchmark code: a folder or file, a git URL, or a link to a folder or file in a repository (required) |
 | `software` | the simulation software's name, e.g. `DuMux` (default: the LLM works it out) |
 | `container` | the container image the simulation runs in (required) |
 | `reference` | an existing description of the same benchmark; `none` to use none (default: looked for) |
@@ -175,7 +175,7 @@ two argparse-inherent caveats (a `true` boolean can't be forced back to
 
 ## Supported software and parameter names
 
-benchmantic comes with descriptions of two simulation codes
+benchmantic comes with descriptions of three simulation codes
 (`software_descriptions/`), used whenever the run config names them; others
 are described by the LLM (see [The software description](#the-software-description)):
 
@@ -183,6 +183,34 @@ are described by the LLM (see [The software description](#the-software-descripti
 |---|---|---|---|
 | DuMux | `main.cc` + `problem.hh` | `params.input` entries, with `getParam<T>()` call sites as context | JSON keys written in `main.cc` |
 | OpenFOAM | a case with `system/controlDict`, or a zip containing one (e.g. `output_template.zip`, unpacked to `<module>/.benchmantic/`) | dictionary entries (`constant/MRFProperties` / `MRF1/omega`), with how each is used in the file as context; template placeholders `{name}` are pre-selected | keys of the dict a Python script `json.dump`s to `solution_metrics.json` |
+| FEniCSx | the script or notebook the implementation link points at | numbers written in the code (`r = 0.05`, `dt = 1 / 1600`, `Constant(mesh, PETSc.ScalarType(0.001))`) | values of the code's variables when it ends (`max(C_D)`, `p_diff[-1]`) |
+
+**Any repository, as it is.** The implementation can be a link to a file or
+folder as the browser shows it, e.g.
+`https://github.com/jorgensd/dolfinx-tutorial/blob/main/chapter2/ns_code2.ipynb`
+(GitHub and GitLab `/blob/<branch>/<path>` and `/tree/<branch>/<path>`), or a
+local path to a file: the repository is cloned at that branch and
+benchmantic starts from that file or folder. A Python script or notebook
+needs neither an input file nor a metrics file (input format `python`,
+`run.type: script`, `metrics.from: variables` in the software description):
+
+- *Inputs*: the top-level constants of the code -- plain numbers, number
+  arithmetic, tuples of numbers, or the one number inside a call. Values
+  computed from other names (`res_min = r / 3`) follow from the inputs and
+  are not offered. A notebook is read as its code cells.
+- *Metrics*: Python expressions over the code's variables when it ends,
+  listed as `metrics.values` (the LLM picks them when it writes the
+  description), else found in the code: values it prints
+  (`print(f"Drag: {C_D}")` -> `drag`) and arrays it fills in a loop (their
+  largest and last value; arrays of times are left out).
+- *Workflow*: the Snakefile copies the implementation folder (next to the
+  Snakefile, else the folder it was described from, else a clone of the
+  linked repository at that branch, made on the first run), writes the
+  case's values into the constants of a copy of the code (only the number
+  changes, so `Constant(mesh, PETSc.ScalarType(...))` stays), appends a few
+  lines that write the metrics to `solution_metrics.json`, and runs the copy
+  in the container. The helpers doing this are copied into the Snakefile, so
+  running it needs nothing of benchmantic.
 
 
 **Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:

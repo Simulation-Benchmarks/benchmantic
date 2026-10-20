@@ -100,6 +100,69 @@ def markdown_section_description(module_dir: Path, repo_root: Path) -> str:
     return ""
 
 
+def code_docs(path: Path) -> str:
+    """The prose of a script or notebook: a notebook's markdown cells, or a
+    script's docstring, else its leading comment block (as jupytext writes
+    a notebook's markdown: "# # Title")."""
+    import ast
+    import json
+
+    text = read_text(path)
+    if path.suffix == ".ipynb":
+        try:
+            cells = json.loads(text).get("cells", [])
+        except ValueError:
+            return ""
+        parts = []
+        for cell in cells:
+            if cell.get("cell_type") == "markdown":
+                source = cell.get("source", "")
+                parts.append("".join(source) if isinstance(source, list) else source)
+        return "\n\n".join(parts)
+    try:
+        doc = ast.get_docstring(ast.parse(text))
+    except SyntaxError:
+        doc = None
+    if doc:
+        return doc
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("#!") or (not lines and not line.strip()):
+            continue
+        if not line.startswith("#"):
+            if lines and not line.strip():
+                lines.append("")
+                continue
+            break
+        lines.append(line[1:].lstrip(" ") if line != "#" else "")
+    return "\n".join(lines).strip()
+
+
+def code_docs_label(path: Path) -> str | None:
+    """`label: main_file` -- the first '# Title' of the linked file's prose
+    (see markdown_title_label for the clean-up)."""
+    m = re.search(r"^#\s+(.+)$", code_docs(path), re.MULTILINE)
+    if not m:
+        return None
+    title = re.sub(r"\s*\(.*?\)\s*", " ", m.group(1))
+    title = re.sub(r"\bbenchmark\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^(test problem|example|demo)\s*\d*\s*:\s*", "", " ".join(title.split()), flags=re.IGNORECASE)
+    return title.lower() or None
+
+
+def code_docs_description(path: Path, limit: int = 1500) -> str:
+    """`description: main_file` -- the title and first paragraphs of the
+    linked file's prose."""
+    text = code_docs(path).strip()
+    paragraphs = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    out = ""
+    for p in paragraphs:
+        if len(out) + len(p) > limit and out:
+            break
+        out += ("\n\n" if out else "") + p
+    return out
+
+
 # ---------------------------------------------------------------------------
 # executable from CMake
 # ---------------------------------------------------------------------------

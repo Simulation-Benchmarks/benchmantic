@@ -32,8 +32,11 @@ cases:
 sources: [main.py]
 
 inputs:
-  format: ini                        # a reader in software/formats/: ini | foam_dict
-  files: [parameters.ini]            # ini: the input file(s) of a case
+  format: ini                        # a reader in software/formats/: ini | foam_dict | python
+                                     # python: top-level constants in a script or notebook
+                                     #   (r = 0.05, dt = 1 / 1600, Constant(mesh, 0.001))
+  files: [parameters.ini]            # ini, python: the input file(s) of a case; python:
+                                     #   default the file the implementation link points at
   # folders: [system, constant, "0"] # foam_dict: case sub-folders with inputs
   # search:                          # find the parameter file if it isn't named
   #   patterns: ["*.input", "*.ini"] # like `files`: candidates are read with the
@@ -51,13 +54,20 @@ inputs:
   #   hint_without_var: "read here"
 
 metrics:
+  from: json_keys                    # json_keys: the keys the code writes to solution_metrics.json
+                                     # variables: values of the code's variables when it ends
+                                     #   (python format); the workflow writes them to the file
+  # values:                          # variables: {metric name: Python expression}; default:
+  #   drag_coefficient_max: "max(C_D)"   # printed values, and arrays filled in a loop
   files: ["*.py"]                    # file name patterns ...
   subfolders: true                   # ... also in sub-folders
   parent_folder: false               # ... also in the folder above
   must_mention: solution_metrics.json  # only files that write the metrics file
 
-label: markdown_title                # markdown_title (README "# Title") | cpp_class
-description: markdown_section        # markdown_section (README section) | doxygen
+label: markdown_title                # markdown_title (README "# Title") | cpp_class | main_file
+description: markdown_section        # markdown_section (README section) | doxygen | main_file
+                                     # main_file: the linked script's docstring/comments or the
+                                     #   notebook's markdown cells (else the README, as above)
 executable:
   from: none                         # cmake | entry (a value in an input file) | none
   # file: system/controlDict         # entry: the file in the case ...
@@ -68,6 +78,10 @@ executable:
 run:                                 # how one case is run, in the container
   type: program                      # program: one program, every input on its command line
                                      # case_folder: inputs written into the case's files, then it is run
+                                     # script: a Python script or notebook, inputs written into a copy
+                                     #   of its code (python format), then the copy is run
+  # script: main.py                  # script: the file to run (default: the linked file)
+                                     #   command: "python3 {script}" -- {script} is the prepared copy
   results_folder: /shared            # folder in the container where results are saved
   working_folder: "{container_root}/{repository}/{implementation_path}"
                                      # where the program runs; {container_root} is the folder above

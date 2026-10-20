@@ -58,9 +58,16 @@ software as JSON.
 
 Rules:
 - Use only keys documented in the template; values must use only the
-  options listed there (formats: ini, foam_dict; run.type: program,
-  case_folder; label: markdown_title, cpp_class; description:
-  markdown_section, doxygen; executable.from: cmake, entry, none).
+  options listed there (formats: ini, foam_dict, python; run.type: program,
+  case_folder, script; metrics.from: json_keys, variables; label:
+  markdown_title, cpp_class, main_file; description: markdown_section,
+  doxygen, main_file; executable.from: cmake, entry, none).
+- When the inputs are numbers written in the code of a Python script or
+  notebook (no input file), use inputs.format python and run.type script,
+  and -- unless the code writes solution_metrics.json itself -- metrics.from
+  variables with metrics.values: {metric name: Python expression over the
+  code's variables when it ends, e.g. "max(C_D)"}, choosing the quantities
+  the benchmark compares (see the code and its comments).
 - Keep every setting the user fixed exactly as given.
 - All paths are relative to the repository folder shown, and every file you
   name must exist there (or inside a zip listed there, for case files).
@@ -86,7 +93,7 @@ settings the user fixed (keep them)
 =====================
 {user_json}
 
-=====================
+{pointed}=====================
 repository: {root_name} -- files
 =====================
 {listing}
@@ -148,17 +155,53 @@ def _listing(root: Path) -> tuple[list[str], list[Path]]:
     return lines, files
 
 
-def _excerpts(root: Path, files: list[Path]) -> str:
+def _outline(path: Path) -> str:
+    """A script's or notebook's top-level constants and the values it
+    computes (prints, arrays filled in loops), with their lines -- what a
+    description of code-written inputs needs, in far fewer characters
+    than the code itself."""
+    from software.formats import python_code
+
+    code = python_code.read_code(path)
+    lines = code.splitlines()
+    out = ["top-level constants (line: code):"]
+    out += [f"  {c['line']}: {lines[c['line'] - 1].strip()}" for c in python_code.runtime.constants(code)]
+    out.append("values it computes (candidate metrics: key = expression, line):")
+    out += [f"  {key} = {expression}  (line {line}: {lines[line - 1].strip()})"
+            for key, expression, line in python_code.result_variables(code)]
+    keep = re.compile(r"print\(|json\.dump|savetxt|to_csv|\.write\(|^for |^while ")
+    out.append("other lines that output something or loop:")
+    out += [f"  {n}: {t.strip()}" for n, t in enumerate(lines, start=1) if keep.search(t.strip())][:40]
+    return "\n".join(out)
+
+
+def _read_excerpt(p: Path) -> list[str]:
+    if p.suffix == ".ipynb":
+        from software.formats import python_code
+        return python_code.read_code(p).splitlines()
+    return p.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def _excerpts(root: Path, files: list[Path], focus: Path | None = None) -> str:
     def rank(p: Path) -> tuple:
         name = p.name.lower()
-        return (not name.startswith("readme"), p.name not in EXCERPT_NAMES, len(p.relative_to(root).parts), str(p))
+        inside = focus is not None and (focus in p.parents or p == focus)
+        return (not inside, not name.startswith("readme"), p.name not in EXCERPT_NAMES,
+                len(p.relative_to(root).parts), str(p))
 
     chosen = [p for p in files if p.suffix in EXCERPT_SUFFIXES or p.name in EXCERPT_NAMES]
     out, used = [], 0
+    if focus is not None and focus.is_file() and focus.suffix in (".py", ".ipynb"):
+        try:
+            outline = _outline(focus)
+            out.append(f"--- {focus.relative_to(root)} (the file the user pointed at: outline)\n{outline}")
+            used += len(outline)
+        except (OSError, ValueError, SyntaxError):
+            pass
     for p in sorted(chosen, key=rank)[:MAX_EXCERPT_FILES]:
         try:
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+            lines = _read_excerpt(p)
+        except (OSError, ValueError):
             continue
         text = "\n".join(lines[:EXCERPT_LINES])
         if used + len(text) > EXCERPT_BUDGET:
@@ -179,23 +222,32 @@ def check(spec: dict[str, Any], root: Path, args: Any) -> list[str]:
         problems.append("`name` is missing")
     if (spec.get("inputs") or {}).get("format") not in FORMATS:
         problems.append(f"inputs.format must be one of {', '.join(FORMATS)}")
-    if not (spec.get("cases") or {}).get("marker"):
+    linked_file = getattr(args, "implementation_path", None) and (root / args.implementation_path).is_file()
+    if not (spec.get("cases") or {}).get("marker") and not linked_file:
         problems.append("cases.marker is missing")
     run = spec.get("run") or {}
     run_type = run.get("type")
     if run_type not in RUN_TYPES:
         problems.append(f"run.type must be one of {', '.join(RUN_TYPES)}")
     required = {"program": ("command", "input_argument"),
-                "case_folder": ("command", "command_without_script", "set_value_command")}.get(run_type, ())
+                "case_folder": ("command", "command_without_script", "set_value_command"),
+                "script": ("command",)}.get(run_type, ())
     missing = [k for k in required if not run.get(k)]
     if missing:
         problems.append(f"run ({run_type}) needs: {', '.join(missing)}")
+    if run_type == "script" and (spec.get("inputs") or {}).get("format") != "python":
+        problems.append("run.type script needs inputs.format python (the inputs are constants in the code)")
+    metrics = spec.get("metrics") or {}
+    if metrics.get("from") not in (None, "json_keys", "variables"):
+        problems.append("metrics.from must be json_keys or variables")
+    if metrics.get("values") and not isinstance(metrics["values"], dict):
+        problems.append("metrics.values must map metric names to Python expressions")
     if problems:
         return problems
 
     try:
         cls = GenericAdapter.from_spec(spec, "candidate")
-        if not cls.detect(root):
+        if not getattr(args, "implementation_path", None) and not cls.detect(root):
             return [("the implementation is not recognised in the repository with these settings "
                      "(implementation.files / cases.marker do not match any file)")]
         adapter = cls()
@@ -255,14 +307,26 @@ def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
             print(f"Using the software description for {cached.get('name')} from {cache} (0 API queries).")
             return cached
 
-    listing, files = _listing(root)
+    inner = getattr(args, "implementation_path", None)
+    focus = root / inner if inner and (root / inner).exists() else None
+    base = root if focus is None else focus if focus.is_dir() else focus.parent
+    listing, files = _listing(base)
+    if base != root:      # paths relative to the repository, as the description needs them
+        prefix = base.relative_to(root)
+        listing = [line if line.startswith((" ", "...")) else str(prefix / line) for line in listing]
+    pointed = "" if focus is None else (
+        "=====================\nthe user pointed at\n=====================\n"
+        f"{inner} -- a {'file' if focus.is_file() else 'folder'} in the repository: the implementation is "
+        "there and benchmantic starts from it (so with a file, `implementation` and `cases.marker` may be "
+        "left out). Only that folder is listed below.\n\n")
     base_prompt = PROMPT_TEMPLATE.format(
+        pointed=pointed,
         template=(Path(__file__).resolve().parent / "template.yaml").read_text(encoding="utf-8"),
         examples=_examples(settings.get("name")),
         user_json=json.dumps(settings, indent=2),
         root_name=root.name,
         listing="\n".join(listing),
-        excerpts=_excerpts(root, files),
+        excerpts=_excerpts(root, files, focus),
         errors="{errors}",
     )
 

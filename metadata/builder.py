@@ -1476,9 +1476,20 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     box is built from this, so it doesn't have to re-derive counts by
     re-parsing the JSON-LD it just wrote.
     """
+    # a link to a folder or file in a repository: clone the repository,
+    # start from that folder or file (see GenericAdapter.find_module_dir)
+    source, link_ref, inner_path = repo_source.split_link(str(args.module_dir))
+    if repo_source.is_remote_source(source):
+        # where the code came from: a workflow run outside the repository fetches it from there
+        args.repository_source = source
+        args.repository_ref = getattr(args, "ref", None) or link_ref
+    if inner_path:
+        args.implementation_path = inner_path
+        if getattr(args, "verbose", False):
+            print(f"Implementation: {inner_path} in {source}" + (f" ({link_ref})" if link_ref else ""))
     resolved_module_dir = repo_source.resolve_source(
-        str(args.module_dir),
-        ref=getattr(args, "ref", None),
+        source,
+        ref=getattr(args, "ref", None) or link_ref,
         clone_dir=getattr(args, "clone_dir", None),
         fresh_clone=getattr(args, "fresh_clone", False),
         keep_clone=getattr(args, "keep_clone", False),
@@ -1608,10 +1619,10 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     raw_map = _scenario_param_lookup(raw_candidates)
 
     if args.scenario_params:
-        provided_keys = [k.strip().lower() for k in args.scenario_params.split(",") if k.strip()]
+        provided_keys = [k.strip() for k in args.scenario_params.split(",") if k.strip()]
         for pk in provided_keys:
-            if pk in raw_map:
-                selected_candidates.append(raw_map[pk])
+            if pk in raw_map or pk.lower() in raw_map:
+                selected_candidates.append(raw_map.get(pk) or raw_map[pk.lower()])
             else:
                 print(f"Warning: Param '{pk}' provided in --scenario-params was not found in {adapter.input_label}. Skipping.", file=sys.stderr)
         if not selected_candidates:
@@ -1955,6 +1966,9 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     build_hints = {
         "executable_name": executable_name,
         "module_relative_path": module_relative_path,
+        "repository": getattr(args, "repository_source", None),
+        "repository_ref": getattr(args, "repository_ref", None),
+        "local_implementation": None if getattr(args, "repository_source", None) else str(module_dir.resolve()),
         "software": adapter.name,
         **adapter.build_hints(module_dir, repo_root),
         **_software_spec_hint(adapter),
@@ -2308,15 +2322,17 @@ def _scenario_param_lookup(candidates) -> dict[str, Any]:
     """Names --scenario-params may use for a parameter (lower-case): the
     key itself, 'section.key' / 'section:key', and the last path component
     of a nested key (e.g. 'omega' for OpenFOAM 'MRF1/omega') -- the short
-    forms only when they are unambiguous."""
-    lookup: dict[str, Any] = {}
+    forms only when they are unambiguous. The key as written matches too,
+    for inputs whose case matters (Python constants `t` and `T`)."""
+    lookup: dict[str, Any] = {c.key: c for c in candidates}
     ambiguous: set[str] = set()
     for c in candidates:
         for alias in {c.key.lower(), c.key.split("/")[-1].lower()}:
             if alias in lookup and lookup[alias] is not c:
                 ambiguous.add(alias)
             lookup.setdefault(alias, c)
-    for alias in ambiguous:
+    exact = {c.key for c in candidates}
+    for alias in ambiguous - exact:
         lookup.pop(alias, None)
     for c in candidates:
         lookup[f"{c.section}.{c.key}".lower()] = c

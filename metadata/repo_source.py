@@ -83,6 +83,34 @@ def is_remote_source(module_dir: str) -> bool:
     return bool(_URL_SCHEME_PATTERN.match(module_dir) or _SCP_LIKE_PATTERN.match(module_dir))
 
 
+#: A link to a folder or file on a web page of a repository, e.g.
+#: https://github.com/org/repo/blob/main/chapter2/ns_code2.ipynb, or
+#: https://gitlab.com/group/project/-/tree/v1.0/benchmarks/cylinder.
+_WEB_LINK_PATTERN = re.compile(
+    r"^(?P<repo>https?://[^/]+/.+?)(?:\.git)?/(?:-/)?(?P<kind>blob|tree|raw)/(?P<ref>[^/?#]+)(?:/(?P<path>[^?#]*))?"
+)
+
+
+def split_link(module_dir: str) -> tuple[str, str | None, str | None]:
+    """(what to clone or use, branch/tag from the link, path inside it).
+
+    A link to a folder or file in a repository's web page
+    (.../blob/<branch>/<path>, .../tree/<branch>/<path>, also GitLab's
+    /-/blob/ and /-/tree/) becomes the repository URL, the branch and the
+    path. A local path to a file becomes its folder and the file name. Any
+    other value is returned as it is. The branch is the single path segment
+    after blob/tree, so a branch name with a slash needs --ref instead."""
+    m = _WEB_LINK_PATTERN.match(module_dir.strip())
+    if m:
+        path = (m.group("path") or "").strip("/") or None
+        return m.group("repo"), m.group("ref"), path
+    if not is_remote_source(module_dir):
+        local = Path(module_dir).expanduser()
+        if local.is_file():
+            return str(local.parent), None, local.name
+    return module_dir, None, None
+
+
 def clone_root() -> Path:
     env = os.environ.get("BENCHMANTIC_REPO_CACHE")
     return Path(env) if env else DEFAULT_CLONE_ROOT

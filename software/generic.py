@@ -34,7 +34,7 @@ from utils import read_text
 #: Where zipped template cases are unpacked, inside the implementation folder.
 EXTRACT_DIR = ".benchmantic"
 #: `run.type` in a description -> the Snakefile style (snakefile/styles/).
-RUN_TYPES = {"program": "command_line", "case_folder": "case_files"}
+RUN_TYPES = {"program": "command_line", "case_folder": "case_files", "script": "python_script"}
 
 
 def load_spec(path: Path, require_name: bool = True) -> dict[str, Any]:
@@ -63,6 +63,9 @@ class GenericAdapter(SoftwareAdapter):
     spec: dict[str, Any] = {}
     #: Repository root last seen (label/executable); a fallback for the docs.
     _repo_root: Path | None = None
+    #: The file a link pointed at (e.g. .../blob/main/chapter2/ns_code2.ipynb),
+    #: set by find_module_dir(); None when the link named a folder.
+    main_file: Path | None = None
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any], slug: str | None = None) -> type[GenericAdapter]:
@@ -102,7 +105,10 @@ class GenericAdapter(SoftwareAdapter):
     def _marker(self) -> tuple[str, ...]:
         """The file marking a case: the configured one, or the parameter
         file found by search when the configured one isn't there."""
-        return getattr(self, "_found_marker", None) or Path(self._section("cases")["marker"]).parts
+        marker = self._section("cases").get("marker")
+        if not marker and self.main_file is not None:
+            return (self.main_file.name,)          # the linked file marks the one case
+        return getattr(self, "_found_marker", None) or Path(marker).parts
 
     def _is_case(self, folder: Path) -> bool:
         return folder.joinpath(*self._marker()).is_file()
@@ -180,10 +186,18 @@ class GenericAdapter(SoftwareAdapter):
         if Path(self._section("cases").get("marker", "")).name in configured:
             self._found_marker = (best.name,)
 
+    def _linked_inputs(self) -> dict[str, Any]:
+        """The linked file as the input file, when the description names
+        none and the input format can read that file."""
+        inputs = self._section("inputs")
+        if self.main_file is None or inputs.get("files") or not hasattr(self._format, "sniff"):
+            return {}
+        return {"files": [self.main_file.name]} if self._format.sniff(self.main_file) else {}
+
     def input_settings(self, module_dir: Path) -> dict[str, Any]:
         """The `inputs:` settings, with a searched-for file name applied."""
         self.find_parameter_files(module_dir)
-        return {**self._section("inputs"), **self._input_overrides}
+        return {**self._section("inputs"), **self._linked_inputs(), **self._input_overrides}
 
     def discover_cases(self, module_dir: Path) -> list[tuple[Path, str]]:
         self.find_parameter_files(module_dir)
@@ -239,6 +253,18 @@ class GenericAdapter(SoftwareAdapter):
         return probe._is_case(root) or bool(probe._case_dirs_under(root)) or bool(probe._zips_under(root))
 
     def find_module_dir(self, root: Path, args: Any) -> Path:
+        # a link to a folder or file inside the repository (see
+        # repo_source.split_link): a file is the implementation's main
+        # file, in its folder; a folder is searched like the repository
+        inner = getattr(args, "implementation_path", None)
+        if inner:
+            path = root / inner
+            if path.is_file():
+                self.main_file = path
+                return path.parent
+            if not path.is_dir():
+                sys.exit(f"Error: {inner} does not exist in the repository (looked in {root}).")
+            root = path
         folder = self._section("implementation").get("folder")
         if folder:
             path = root / folder
@@ -314,7 +340,7 @@ class GenericAdapter(SoftwareAdapter):
         return chosen or list(candidates)
 
     def resolve_case_params(self, case_dir: Path, parameter_fields: dict[str, Any]) -> dict[str, Any]:
-        settings = {**self._section("inputs"), **getattr(self, "_input_overrides", {})}
+        settings = {**self._section("inputs"), **self._linked_inputs(), **getattr(self, "_input_overrides", {})}
         return self._format.resolve(case_dir, parameter_fields, settings)
 
     def input_display(self, section: str, key: str) -> str:
@@ -324,7 +350,52 @@ class GenericAdapter(SoftwareAdapter):
     def metric_files(self, module_dir: Path, repo_root: Path) -> list[Path]:
         return sources.metric_files(module_dir, repo_root, self._section("metrics"))
 
+    def _code_files(self, module_dir: Path, repo_root: Path) -> list[Path]:
+        """The code computing the metrics, for `metrics: {from: variables}`:
+        `metrics.files` when given, else the input files (or the linked file)."""
+        if self._section("metrics").get("files"):
+            return self.metric_files(module_dir, repo_root)
+        case_dir = self.template_case(module_dir)
+        files = self._format.input_files(case_dir, self.input_settings(module_dir))
+        return files or ([self.main_file] if self.main_file else [])
+
+    def metric_expressions(self, module_dir: Path, repo_root: Path) -> dict[str, str]:
+        """{metric key: Python expression} for metrics computed by the code
+        (`metrics: {from: variables}`): `metrics.values` when the description
+        lists them, else what python_code.result_variables() finds."""
+        settings = self._section("metrics")
+        if settings.get("from") != "variables":
+            return {}
+        if settings.get("values"):
+            return {str(k): str(v) for k, v in settings["values"].items()}
+        from software.formats import python_code
+        found: dict[str, str] = {}
+        for path in self._code_files(module_dir, repo_root):
+            for key, expression, _ in python_code.result_variables(python_code.read_code(path)):
+                found.setdefault(key, expression)
+        return found
+
+    def _variable_metrics(self, module_dir: Path, repo_root: Path) -> list[MetricCandidate]:
+        from software.formats import python_code
+        codes = [python_code.read_code(p) for p in self._code_files(module_dir, repo_root)]
+        lines = {k: line for code in codes for k, _, line in python_code.result_variables(code)}
+        candidates = []
+        for key, expression in self.metric_expressions(module_dir, repo_root).items():
+            try:
+                context = "\n".join(python_code.expression_context(code, expression, lines.get(key)) for code in codes)
+            except SyntaxError:
+                sys.exit(f"Error: metric {key}: {expression!r} is not a Python expression.")
+            candidates.append(MetricCandidate(key=key, context=context[:600]))
+        if not candidates:
+            where = ", ".join(str(p) for p in self._code_files(module_dir, repo_root)) or "(no code file)"
+            sys.exit(f"No metrics found in {where}: no printed values and no arrays filled in a loop. "
+                     "List them in the software description as metrics.values, e.g. "
+                     "{drag_coefficient_max: 'max(C_D)'}.")
+        return candidates
+
     def discover_metrics(self, module_dir: Path, repo_root: Path) -> list[MetricCandidate]:
+        if self._section("metrics").get("from") == "variables":
+            return self._variable_metrics(module_dir, repo_root)
         found: list[MetricCandidate] = []
         seen: set[str] = set()
         files = self.metric_files(module_dir, repo_root)
@@ -347,13 +418,22 @@ class GenericAdapter(SoftwareAdapter):
         how = self.spec.get("description", "markdown_section")
         if how == "doxygen":
             return sources.doxygen_description(list(texts.values()))
+        if how == "main_file" and self.main_file is not None:
+            found = sources.code_docs_description(self.main_file)
+            if found:
+                return found
         root = getattr(self, "docs_root", None) or self._repo_root or module_dir
         return sources.markdown_section_description(module_dir, root)
 
     def benchmark_label(self, module_dir: Path, repo_root: Path, texts: dict[str, str]) -> str | None:
         self._repo_root = repo_root
-        if self.spec.get("label", "markdown_title") == "cpp_class":
+        how = self.spec.get("label", "markdown_title")
+        if how == "cpp_class":
             return sources.cpp_class_label(list(texts.values()))
+        if how == "main_file" and self.main_file is not None:
+            found = sources.code_docs_label(self.main_file)
+            if found:
+                return found
         return sources.markdown_title_label(module_dir, repo_root)
 
     def executable_name(self, module_dir: Path, repo_root: Path) -> tuple[str | None, Path | None]:
@@ -366,7 +446,21 @@ class GenericAdapter(SoftwareAdapter):
             path = self.template_case(module_dir) / settings["file"]
             value = self._format.read_entry(path, settings["key"])
             return (value, path) if value else (None, None)
+        if self.run_settings.get("type") == "script":          # the script itself
+            script = self.script_file(module_dir)
+            return (script.name, script) if script else (None, None)
         return None, None
+
+    def script_file(self, module_dir: Path) -> Path | None:
+        """For `run.type: script`: `run.script`, else the linked file, else
+        the first input file."""
+        named = self.run_settings.get("script")
+        if named:
+            return module_dir / named
+        if self.main_file is not None:
+            return self.main_file
+        files = self._format.input_files(self.template_case(module_dir), self.input_settings(module_dir))
+        return files[0] if files else None
 
     def build_hints(self, module_dir: Path, repo_root: Path) -> dict[str, Any]:
         return self.style().build_hints(self, module_dir, repo_root)
