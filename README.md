@@ -86,12 +86,16 @@ pip install roc-validator
 
 - Python 3.10+
 - [Snakemake](https://snakemake.github.io/) and Docker, for running the generated workflow
-- An LLM. Name it in the run config -- `llm_provider: groq`, `claude`, `openai` or `claude-code`;
-  `llm_model` is optional.
+- An LLM. Name it in the run config -- `llm_provider: groq`, `claude`, `openai`, `claude-code` or
+  `codex`; `llm_model` is optional.
   - `claude-code` uses Claude through [Claude Code](https://code.claude.com/docs/en/setup) (the `claude`
     command), signed in with your Claude Pro or Max plan: no API key and no API credits; the questions
     count against the plan's usage limits, shared with claude.ai. Install Claude Code and run `claude`
     once to sign in. Default model `sonnet` (`llm_model: opus` also works).
+  - `codex` uses OpenAI's models through [Codex](https://developers.openai.com/codex/quickstart) (the
+    `codex` command), signed in with your ChatGPT plan: no API key and no API credits; the questions
+    use the plan's included usage. Install Codex and run `codex` once to sign in. Without `llm_model`,
+    Codex's own default model.
   - The others need an API key, given in one of three ways -- never in the run config, which gets shared:
     - in the environment: `export LLM_API_KEY=<key>` (the provider's usual variable --
       `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` -- works too, and is the way when
@@ -172,7 +176,7 @@ verbose: true
 | `software` | the simulation software's name, e.g. `DuMux` (default: the LLM works it out) |
 | `container` | the container image the simulation runs in (required) |
 | `reference` | an existing description of the same benchmark; `none` to use none (default: looked for) |
-| `llm_provider`, `llm_model` | which LLM to ask -- `groq`, `claude`, `openai` or `claude-code` (your Claude plan, no API key; default: the first whose key variable is set) -- and optionally which of its models |
+| `llm_provider`, `llm_model` | which LLM to ask -- `groq`, `claude`, `openai`, `claude-code` (your Claude plan) or `codex` (your ChatGPT plan) -- the last two need no API key; default: the first whose key variable is set -- and optionally which of its models |
 | `review_below_confidence` | you review every LLM answer less sure than this (default 0.7) |
 | `verbose` | show more detail while running |
 | `software_description` | your own description of the software (see below) |

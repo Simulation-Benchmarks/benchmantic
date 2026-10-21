@@ -34,6 +34,7 @@ import json
 import math
 import os
 import re
+from pathlib import Path
 import sys
 import time
 from typing import TYPE_CHECKING, Any
@@ -103,13 +104,23 @@ PROVIDER_CONFIG: dict[str, dict[str, Any]] = {
         "signup_url": "https://code.claude.com/docs/en/setup",
         "tpm_budget": 200000,
     },
+    # OpenAI's models through Codex (the `codex` command), signed in with a
+    # ChatGPT plan: the questions use the plan's included usage instead of
+    # API credits. No key. Without llm_model, Codex's own default model.
+    "codex": {
+        "base_url": "",
+        "api_key_env": "",
+        "default_model": "",
+        "signup_url": "https://developers.openai.com/codex/quickstart",
+        "tpm_budget": 200000,
+    },
 }
 
 DEFAULT_PROVIDER = "groq"
 #: Without llm_provider, the first of these whose API key is set is used.
 PROVIDER_ORDER = ("groq", "claude", "openai")
 #: Names people use for a provider -> its name here.
-PROVIDER_ALIASES = {"anthropic": "claude", "chatgpt": "openai", "claude_code": "claude-code", "claudecode": "claude-code"}
+PROVIDER_ALIASES = {"anthropic": "claude", "chatgpt": "openai", "claude_code": "claude-code", "claudecode": "claude-code", "codex-cli": "codex"}
 
 
 #: One variable for the key of whichever LLM is chosen (also set by the
@@ -556,6 +567,53 @@ class _ClaudeCodeClient:
         })()
 
 
+class _CodexClient:
+    """Answers chat.completions.create() with the `codex` command (OpenAI's
+    Codex CLI) in non-interactive mode, so it signs in with the user's
+    ChatGPT plan. Read-only sandbox in an empty folder: a plain question
+    and answer. (Codex has no separate system prompt: it goes first in the
+    prompt.)"""
+
+    def __init__(self) -> None:
+        import shutil
+
+        self.command = shutil.which("codex")
+        if not self.command:
+            raise RuntimeError("llm_provider codex needs OpenAI's Codex CLI: install it "
+                               "(https://developers.openai.com/codex/quickstart) and sign in once with "
+                               "`codex` using your ChatGPT account.")
+        self.chat = self
+        self.completions = self
+        self.models = self
+
+    def list(self):                                  # no other models to switch to
+        return type("Listing", (), {"data": []})()
+
+    def create(self, *, model, messages, **_):
+        import subprocess
+        import tempfile
+
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        question = "\n\n".join(m["content"] for m in messages if m["role"] != "system")
+        prompt = f"{system}\n\n{question}" if system else question
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("OPENAI_API_KEY", "CODEX_API_KEY", KEY_ENV)}       # use the plan, not API credits
+        with tempfile.TemporaryDirectory(prefix="benchmantic_codex_") as folder:
+            answer = Path(folder) / "answer.txt"
+            command = [self.command, "exec", "-", "--skip-git-repo-check", "--ephemeral",
+                       "--sandbox", "read-only", "--output-last-message", str(answer)]
+            if model:
+                command += ["--model", model]
+            done = subprocess.run(command, input=prompt, capture_output=True, text=True, cwd=folder, env=env,
+                                  timeout=900, check=False)
+            text = answer.read_text(encoding="utf-8") if answer.is_file() else ""
+        if done.returncode != 0 or not text.strip():
+            raise RuntimeError(f"Codex failed (exit {done.returncode}): {(done.stderr or done.stdout).strip()[-500:]} "
+                               "-- is `codex` signed in with your ChatGPT account (run `codex` once)?")
+        message = type("Message", (), {"content": text})()
+        return type("Response", (), {"choices": [type("Choice", (), {"message": message})()], "usage": None})()
+
+
 def get_client(provider: str = DEFAULT_PROVIDER) -> OpenAI:
     """
     Create an OpenAI-compatible client for the given provider.
@@ -568,6 +626,8 @@ def get_client(provider: str = DEFAULT_PROVIDER) -> OpenAI:
 
     if provider == "claude-code":
         return _ClaudeCodeClient()   # type: ignore[return-value]
+    if provider == "codex":
+        return _CodexClient()        # type: ignore[return-value]
     config = PROVIDER_CONFIG[provider]
     key = api_key(provider) or _ask_for_key(provider)
     if not key:

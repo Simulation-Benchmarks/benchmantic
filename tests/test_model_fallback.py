@@ -187,3 +187,30 @@ def test_claude_code_uses_the_plan_not_api_credits(monkeypatch):
     assert command[:4] == ["/usr/bin/claude", "-p", "--output-format", "json"]
     assert command[command.index("--model") + 1] == "sonnet" and command[command.index("--tools") + 1] == ""
     assert seen["input"] == "2+2?" and "ANTHROPIC_API_KEY" not in seen["env"]
+
+
+def test_codex_uses_the_chatgpt_plan_not_api_credits(monkeypatch):
+    """llm_provider: codex asks the `codex` command, signed in with a ChatGPT
+    plan: no key, and API key variables are kept from it."""
+    import subprocess
+
+    seen = {}
+
+    def run(command, **kw):
+        seen.update(command=command, **kw)
+        answer = command[command.index("--output-last-message") + 1]
+        Path(answer).write_text('[{"answer": 4}]')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/codex")
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-be-used")
+    monkeypatch.setattr(inference, "_EXHAUSTED_MODELS", {})
+    answer = inference._query_llm_json_array(provider="codex", model=None, system_prompt="Only JSON.",
+                                             prompt="2+2?", item_count=1, item_label="x",
+                                             validator=lambda x: x, retries=1, retry_delay=0, verbose=False)
+    assert answer == [{"answer": 4}]
+    command = seen["command"]
+    assert command[:3] == ["/usr/bin/codex", "exec", "-"] and command[command.index("--sandbox") + 1] == "read-only"
+    assert "--model" not in command                                         # Codex's own default model
+    assert seen["input"] == "Only JSON.\n\n2+2?" and "OPENAI_API_KEY" not in seen["env"]
