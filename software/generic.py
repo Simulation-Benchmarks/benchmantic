@@ -33,8 +33,11 @@ from utils import read_text
 
 #: Where zipped template cases are unpacked, inside the implementation folder.
 EXTRACT_DIR = ".benchmantic"
+#: With `cases.files`, the name of each case's file in its own folder (plus the suffix).
+CASE_FILE_STEM = "case_parameters"
 #: `run.type` in a description -> the Snakefile style (snakefile/styles/).
-RUN_TYPES = {"program": "command_line", "case_folder": "case_files", "script": "python_script"}
+RUN_TYPES = {"program": "command_line", "case_folder": "case_files", "script": "python_script",
+             "parameter_file": "parameter_file"}
 
 
 def load_spec(path: Path, require_name: bool = True) -> dict[str, Any]:
@@ -105,10 +108,59 @@ class GenericAdapter(SoftwareAdapter):
     def _marker(self) -> tuple[str, ...]:
         """The file marking a case: the configured one, or the parameter
         file found by search when the configured one isn't there."""
+        if self._case_files_pattern():
+            return (self._case_file_name(),)        # each case file, copied to a folder of its own
         marker = self._section("cases").get("marker")
         if not marker and self.main_file is not None:
             return (self.main_file.name,)          # the linked file marks the one case
         return getattr(self, "_found_marker", None) or Path(marker).parts
+
+    # --- one case per file (`cases.files`) -----------------------------------------------
+    def _case_files_pattern(self) -> str | None:
+        return self._section("cases").get("files")
+
+    def _case_file_name(self) -> str:
+        """The name each case file gets in its own folder."""
+        return CASE_FILE_STEM + Path(self._case_files_pattern() or "").suffix
+
+    def case_files_folder(self, module_dir: Path) -> Path:
+        """Where the case files are: `cases.folder`, relative to the implementation."""
+        return (module_dir / self._section("cases").get("folder", ".")).resolve()
+
+    def case_file_paths(self, module_dir: Path) -> list[Path]:
+        pattern = self._case_files_pattern()
+        folder = self.case_files_folder(module_dir)
+        return sorted(p for p in folder.glob(pattern) if p.is_file()) if pattern and folder.is_dir() else []
+
+    def _case_id_from_file(self, path: Path) -> str:
+        """parameters_05.json with pattern parameters_*.json -> "05"."""
+        pattern = self._case_files_pattern() or ""
+        if pattern.count("*") == 1:
+            head, tail = pattern.split("*")
+            name = path.name
+            if name.startswith(head) and name.endswith(tail) and len(name) > len(head) + len(tail):
+                return name[len(head):len(name) - len(tail)]
+        return path.stem
+
+    def _file_cases(self, module_dir: Path) -> list[tuple[Path, str]]:
+        """Each file matching `cases.files` is a case: it is copied to
+        .benchmantic/cases/<id>/ under the implementation, where the input
+        format reads it like any case folder. `case_sources` keeps the originals."""
+        self.case_sources: dict[str, Path] = {}
+        cases = []
+        for path in self.case_file_paths(module_dir):
+            case_id = self._case_id_from_file(path)
+            target = module_dir / EXTRACT_DIR / "cases" / case_id
+            target.mkdir(parents=True, exist_ok=True)
+            copy = target / self._case_file_name()
+            if not copy.exists() or copy.read_bytes() != path.read_bytes():
+                copy.write_bytes(path.read_bytes())
+            self.case_sources[case_id] = path
+            cases.append((target, case_id))
+        if not cases:
+            sys.exit(f"Error: no {self.name} case file ({self._case_files_pattern()}) found in "
+                     f"{self.case_files_folder(module_dir)}")
+        return cases
 
     def _is_case(self, folder: Path) -> bool:
         return folder.joinpath(*self._marker()).is_file()
@@ -174,7 +226,7 @@ class GenericAdapter(SoftwareAdapter):
         self.parameter_files: list[param_files.FoundFile] = []
         inputs = self._section("inputs")
         search = inputs.get("search")
-        if not search or not hasattr(self._format, "sniff"):
+        if not search or not hasattr(self._format, "sniff") or self._case_files_pattern():
             return
         configured = [str(f) for f in inputs.get("files") or []]
         self.parameter_files = param_files.find_parameter_files(
@@ -188,7 +240,10 @@ class GenericAdapter(SoftwareAdapter):
 
     def _linked_inputs(self) -> dict[str, Any]:
         """The linked file as the input file, when the description names
-        none and the input format can read that file."""
+        none and the input format can read that file; with `cases.files`,
+        each case's copy of its file."""
+        if self._case_files_pattern():
+            return {"files": [self._case_file_name()]}
         inputs = self._section("inputs")
         if self.main_file is None or inputs.get("files") or not hasattr(self._format, "sniff"):
             return {}
@@ -200,6 +255,8 @@ class GenericAdapter(SoftwareAdapter):
         return {**self._section("inputs"), **self._linked_inputs(), **self._input_overrides}
 
     def discover_cases(self, module_dir: Path) -> list[tuple[Path, str]]:
+        if self._case_files_pattern():
+            return self._file_cases(module_dir)
         self.find_parameter_files(module_dir)
         settings = self._section("cases")
         if not settings.get("nested") and self._is_case(module_dir):
@@ -250,6 +307,8 @@ class GenericAdapter(SoftwareAdapter):
         if cls._files():
             return cls._has_files(root) or any(cls._has_files(p.parent) for p in root.rglob(cls._files()[0]))
         probe = cls()
+        if probe._case_files_pattern():
+            return bool(probe.case_file_paths(root)) or any(root.rglob(probe._case_files_pattern()))
         return probe._is_case(root) or bool(probe._case_dirs_under(root)) or bool(probe._zips_under(root))
 
     def find_module_dir(self, root: Path, args: Any) -> Path:
@@ -271,6 +330,11 @@ class GenericAdapter(SoftwareAdapter):
             if not path.is_dir():
                 sys.exit(f"Error: implementation.folder {folder} does not exist under {root}")
             return path
+        if self._case_files_pattern() and not self._files():
+            if not self.case_file_paths(root):
+                sys.exit(f"Error: no case file ({self._case_files_pattern()}) in {self.case_files_folder(root)} "
+                         "-- check cases.files and cases.folder in the software description.")
+            return root
         files = self._files()
         if files:
             if self._has_files(root):
@@ -446,6 +510,10 @@ class GenericAdapter(SoftwareAdapter):
             path = self.template_case(module_dir) / settings["file"]
             value = self._format.read_entry(path, settings["key"])
             return (value, path) if value else (None, None)
+        if self.run_settings.get("type") == "parameter_file":   # the last program file the command runs
+            names = re.findall(r"[\w./-]+\.(?:py|jl|sh|R|m)\b", str(self.run_settings.get("command", "")))
+            found = [module_dir / n for n in names if (module_dir / n).is_file()]
+            return (found[-1].name, found[-1]) if found else (None, None)
         if self.run_settings.get("type") == "script":          # the script itself
             script = self.script_file(module_dir)
             return (script.name, script) if script else (None, None)

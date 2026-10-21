@@ -64,11 +64,18 @@ WORKFLOW_ONLY = {"semantic_benchmark_src", "show_output", "skip_show", "skip_che
 PLAIN_NAME = {dest: key for key, dest in PLAIN_KEYS.items()}
 
 
+#: Settings that are paths: relative ones are looked for next to the config file too.
+RELATIVE_TO_CONFIG = ("module_dir", "software_description", "reference_benchmark")
+
+
 def translate(data: dict[str, Any], source: Path) -> dict[str, Any]:
     """Run-config keys -> {argparse dest: value}."""
     out: dict[str, Any] = {}
     for key, value in data.items():
         key = str(key).lstrip("-").replace("-", "_")
+        if key in ("llm_api_key", "api_key") or key.endswith("_api_key"):
+            sys.exit(f"Error: {source}: API keys don't go into run config files (they get shared). Set "
+                     "LLM_API_KEY in the environment, pass --llm-api-key, or paste the key when asked.")
         if key == "reference" and str(value).lower() in ("none", "no", "false"):
             out["no_reference"] = True
             continue
@@ -76,6 +83,14 @@ def translate(data: dict[str, Any], source: Path) -> dict[str, Any]:
         if dest in out and out[dest] != value:
             sys.exit(f"Error: {source}: {key} sets something already set by another key.")
         out[dest] = value
+    # a relative path to a file next to the config file (e.g. `software_description:
+    # my-software.yaml`) means that file, wherever benchmantic is run from
+    for dest in RELATIVE_TO_CONFIG:
+        value = out.get(dest)
+        if isinstance(value, str) and value and not Path(value).is_absolute() and "://" not in value:
+            beside = Path(source).resolve().parent / Path(value).expanduser()
+            if beside.exists() and not Path(value).exists():
+                out[dest] = str(beside)
     return out
 
 

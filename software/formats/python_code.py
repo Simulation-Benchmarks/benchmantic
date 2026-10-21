@@ -158,13 +158,25 @@ def result_variables(code: str) -> list[tuple[str, str, int]]:
       - arrays filled in a loop: C_D[i] = ... -> C_D_max = max(C_D), C_D_final = C_D[-1]
         (arrays named like times are left out)."""
     try:
-        tree = ast.parse(code)
+        tree = runtime.parse(code)
     except SyntaxError:
         return []
     found: dict[str, tuple[str, int]] = {}
+    # dicts written out with string keys: {'skfem': ..., 'exact': ...} -> one metric per entry
+    dicts: dict[str, list[str]] = {}
+    for statement in runtime._top_level(tree.body):
+        if (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name) and isinstance(statement.value, ast.Dict)
+                and statement.value.keys
+                and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in statement.value.keys)):
+            dicts[statement.targets[0].id] = [k.value for k in statement.value.keys]
 
     def add(label: str, expression: str | None, line: int) -> None:
         key = _slug(label) or _slug(expression or "")
+        if expression in dicts:
+            for entry in dicts[expression]:
+                add(f"{key}_{entry}", f"{expression}[{entry!r}]", line)
+            return
         if expression and key and key not in found and not key.isdigit():
             found[key] = (expression, line)
 

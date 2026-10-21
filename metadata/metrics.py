@@ -97,8 +97,17 @@ def discover_metrics_in_python(text: str, metrics_file: str = METRICS_FILE_NAME,
         return any(isinstance(n, ast.Constant) and isinstance(n.value, str) and metrics_file in n.value
                    for n in ast.walk(node))
 
-    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    scopes = [s for s in scopes if mentions_metrics_file(s)] or ([tree] if mentions_metrics_file(tree) else [])
+    def dumps_metrics(node) -> bool:
+        """json.dump(metrics, ...) -- the dumped variable is named like metrics
+        (for scripts that are told the file name, e.g. --output_metrics_file)."""
+        return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("dump", "dumps")
+                   and getattr(n.func.value, "id", None) == "json" and n.args
+                   and "metric" in getattr(n.args[0], "id", "").lower() for n in ast.walk(node))
+
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes = [s for s in functions if mentions_metrics_file(s)] or ([tree] if mentions_metrics_file(tree) else [])
+    if not scopes:
+        scopes = [s for s in functions if dumps_metrics(s)] or ([tree] if dumps_metrics(tree) else [])
 
     lines = text.splitlines()
     candidates: list[MetricCandidate] = []

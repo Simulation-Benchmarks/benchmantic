@@ -120,7 +120,8 @@ def code_docs(path: Path) -> str:
                 parts.append("".join(source) if isinstance(source, list) else source)
         return "\n\n".join(parts)
     try:
-        doc = ast.get_docstring(ast.parse(text))
+        from software.formats.python_code_runtime import parse
+        doc = ast.get_docstring(parse(text))
     except SyntaxError:
         doc = None
     if doc:
@@ -140,11 +141,20 @@ def code_docs(path: Path) -> str:
 
 def code_docs_label(path: Path) -> str | None:
     """`label: main_file` -- the first '# Title' of the linked file's prose
-    (see markdown_title_label for the clean-up)."""
-    m = re.search(r"^#\s+(.+)$", code_docs(path), re.MULTILINE)
-    if not m:
+    (see markdown_title_label for the clean-up); for a script without one,
+    the first paragraph of its docstring ("Laplace with mixed boundary
+    conditions.")."""
+    docs = code_docs(path)
+    m = re.search(r"^#\s+(.+)$", docs, re.MULTILINE)
+    if m:
+        heading = m.group(1)
+    elif path.suffix == ".py" and docs.strip():
+        heading = " ".join(re.split(r"\n\s*\n", docs.strip())[0].split()).rstrip(".")
+        if len(heading) > 100:
+            return None
+    else:
         return None
-    title = re.sub(r"\s*\(.*?\)\s*", " ", m.group(1))
+    title = re.sub(r"\s*\(.*?\)\s*", " ", heading)
     title = re.sub(r"\bbenchmark\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"^(test problem|example|demo)\s*\d*\s*:\s*", "", " ".join(title.split()), flags=re.IGNORECASE)
     return title.lower() or None

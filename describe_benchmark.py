@@ -103,6 +103,7 @@ always does (see metadata/repo_source.py for the URL-clone case).
 from __future__ import annotations
 
 import argparse
+import os
 import contextlib
 import io
 import json
@@ -274,6 +275,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     meta.add_argument("--scenario-params", type=str, default=None)
     meta.add_argument("--full-value-params", type=str, default=None)
     meta.add_argument("--provider", type=str, default=None)
+    meta.add_argument("--llm-api-key", default=None, metavar="KEY",
+                      help="The API key of the chosen LLM, for this run (else LLM_API_KEY or the provider's "
+                           "usual variable, else it is asked for). Not in run config files.")
     meta.add_argument("--model", type=str, default=None)
     meta.add_argument("--clear-cache", action="store_true")
     meta.add_argument("--fallback-on-error", action="store_true")
@@ -387,6 +391,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
     check for None first and skip that chain instead of passing None
     through.
     """
+    if getattr(args, "llm_api_key", None):
+        os.environ["LLM_API_KEY"] = args.llm_api_key
     needs_interactive = args.scenario_params is None or not args.skip_review
     if needs_interactive and not (args.verbose or args.debug):
         try:
@@ -427,7 +433,7 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         parameter_names=args.parameter_names,
         scenario_params=args.scenario_params,
         full_value_params=args.full_value_params,
-        provider=args.provider or builder.DEFAULT_PROVIDER,
+        provider=args.provider,
         model=args.model,
         fallback_on_error=args.fallback_on_error,
         verbose=args.verbose or args.debug,

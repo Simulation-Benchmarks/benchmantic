@@ -24,9 +24,18 @@ benchmantic.
 import ast
 import json
 import operator
+import warnings
 
 _BINARY = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
            ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod, ast.Pow: operator.pow}
+
+
+def parse(code):
+    """ast.parse without the SyntaxWarnings of the code's own string
+    literals (e.g. "\\D" in a docstring), which are not benchmantic's business."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(code)
 
 
 def code_view(text, notebook=False):
@@ -136,7 +145,7 @@ def constants(code):
     -- start/end line and column, 0-based columns -- and `wrapped` (True
     when the number sits inside a call)."""
     try:
-        tree = ast.parse(code)
+        tree = parse(code)
     except SyntaxError:
         return []
     found, seen, assigned = [], set(), set()

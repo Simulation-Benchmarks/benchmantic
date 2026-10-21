@@ -1,0 +1,17 @@
+{
+    "configuration": "1",
+    "radius": {
+        "value": 0.2,
+        "unit": "m"
+    },
+    "length": {
+        "value": 1.0,
+        "unit": "m"
+    },
+    "young-modulus": {
+        "value": 210e9,
+        "unit": "Pa"
+    },
+    "element-order": 1,
+    "quadrature-rule": "gauss"
+}

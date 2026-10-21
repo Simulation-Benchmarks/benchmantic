@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import shutil
 import sys
@@ -38,7 +39,7 @@ from ai.cache import (
 )
 from ai import corrections as corrections_store
 from ai.inference import (
-    DEFAULT_BATCH_SIZE, DEFAULT_PROVIDER, DEFAULT_TPM_BUDGET, PROVIDER_CONFIG,
+    DEFAULT_BATCH_SIZE, DEFAULT_PROVIDER, DEFAULT_TPM_BUDGET, PROVIDER_CONFIG, choose_provider,
     infer_metric_metadata, infer_parameter_metadata,
 )
 from ai import review
@@ -50,7 +51,7 @@ from metadata.mapping import (
     InputMapping, ParameterMapping, check_against_configurations, check_expression, identity_expression,
     neutral_name, render, template_consistency,
 )
-from metadata.reference import discover_reference, load_reference
+from metadata.reference import discover_reference, fetch_reference, load_reference
 from ai.mapping import infer_parameter_mapping
 from metadata.publication import extract_publication_citation, extract_publication_doi
 from metadata.repository import (
@@ -1314,7 +1315,7 @@ def add_semantic_override_args(ap) -> None:
 
 def add_mapping_args(ap) -> None:
     """--reference-benchmark / --parameter-names, shared with describe_benchmark.py."""
-    ap.add_argument("--reference-benchmark", type=Path, default=None, metavar="JSONLD",
+    ap.add_argument("--reference-benchmark", type=str, default=None, metavar="JSONLD",
                     help="An existing description of the same benchmark to map onto. Default: looked "
                          "for automatically -- a benchmark description in the repository (e.g. "
                          "benchmark/<version>/minimal-configurations.json), else benchmantic's earlier "
@@ -1385,13 +1386,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "captured as a list, instead of collapsing to a single value via the usual LLM-picked "
                           "token index. Use this for parameters like a multi-value radius/coordinate list where "
                           "every token matters, not just one.")
-    ap.add_argument("--provider", type=str, choices=sorted(PROVIDER_CONFIG), default=DEFAULT_PROVIDER,
-                     help=f"LLM provider used to infer parameter metadata (default: {DEFAULT_PROVIDER}). "
-                          "Groq is free and requires GROQ_API_KEY; OpenAI requires OPENAI_API_KEY and billing.")
+    ap.add_argument("--provider", type=str, default=None,
+                     help="The LLM: " + ", ".join(PROVIDER_CONFIG) + ". Its API key: --llm-api-key, else "
+                          "LLM_API_KEY or the provider's usual variable (GROQ_API_KEY, ANTHROPIC_API_KEY, "
+                          "OPENAI_API_KEY), else it is asked for. Default: the first LLM whose variable is set "
+                          "(else groq).")
+    ap.add_argument("--llm-api-key", default=None, metavar="KEY",
+                    help="The API key of the chosen LLM, for this run. Not in run config files.")
     ap.add_argument("--model", type=str, default=None,
-                     help="Model name to use for the chosen --provider. Defaults to "
-                          f"'{PROVIDER_CONFIG['groq']['default_model']}' for groq or "
-                          f"'{PROVIDER_CONFIG['openai']['default_model']}' for openai.")
+                     help="The model of that LLM (default: " + ", ".join(f"{p}: {c['default_model']}"
+                                                                for p, c in PROVIDER_CONFIG.items()) + ").")
     ap.add_argument("--fallback-on-error", action="store_true",
                      help="If the LLM call fails (e.g. quota exceeded, network error), fall back to "
                           "local placeholder metadata (unitless, confidence 0.0) instead of exiting. "
@@ -1476,6 +1480,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     box is built from this, so it doesn't have to re-derive counts by
     re-parsing the JSON-LD it just wrote.
     """
+    if getattr(args, "llm_api_key", None):
+        os.environ["LLM_API_KEY"] = args.llm_api_key
+    args.provider = choose_provider(getattr(args, "provider", None))
     # a link to a folder or file in a repository: clone the repository,
     # start from that folder or file (see GenericAdapter.find_module_dir)
     source, link_ref, inner_path = repo_source.split_link(str(args.module_dir))
@@ -2027,6 +2034,7 @@ def _find_reference(args, adapter, docs_root: Path, benchmark_label: str | None)
         return None, ""
     explicit = getattr(args, "reference_benchmark", None)
     if explicit is not None:
+        explicit = fetch_reference(str(explicit))
         if not Path(explicit).is_file():
             sys.exit(f"Error: --reference-benchmark {explicit} does not exist "
                      f"(relative paths are resolved from {Path.cwd()}).")

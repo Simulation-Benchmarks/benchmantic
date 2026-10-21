@@ -25,8 +25,11 @@ container: registry.example.org/my-benchmark:1.0   # the container image it runs
 # benchmantic looks for one itself; write `reference: none` to not use any.
 # reference: /path/to/benchmark/1.0.0/minimal-configurations.json
 
-# llm_model: openai/gpt-oss-120b      # which LLM to ask (default: the provider's default)
-# llm_provider: groq                  # groq (default) or openai
+# llm_provider: claude                # the LLM: groq, claude, openai, or claude-code (Claude through Claude
+#                                     # Code with your Claude Pro/Max plan, no API key) (default: the first with a key)
+# llm_model: claude-sonnet-5-5        # which of its models (default: openai/gpt-oss-120b, claude-sonnet-5-5, gpt-4o)
+#                                     # The key never goes here: export LLM_API_KEY=<key>, or pass
+#                                     # --llm-api-key <key>, or paste it when asked during the run.
 # review_below_confidence: 0.99       # you review every LLM answer less sure than this (default 0.7)
 # verbose: true                       # show more detail while running
 

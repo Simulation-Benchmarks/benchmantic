@@ -142,3 +142,12 @@ def test_template_documents_every_key():
     for path in DESCRIPTIONS:
         missing = {k for k in keys(yaml.safe_load(path.read_text())) if f"{k}:" not in template}
         assert not missing, f"{path.name}: not documented in software/template.yaml: {missing}"
+
+
+def test_a_file_named_in_the_run_config_is_found_next_to_it(tmp_path, monkeypatch):
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "my-software.yaml").write_text("name: Mine\n")
+    path = tmp_path / "configs" / "run.yaml"
+    path.write_text("implementation: /x\ncontainer: img:1\nsoftware_description: my-software.yaml\n")
+    monkeypatch.chdir(tmp_path)                    # run from elsewhere
+    assert config.load_config_file(path)["software_description"] == str(tmp_path / "configs" / "my-software.yaml")

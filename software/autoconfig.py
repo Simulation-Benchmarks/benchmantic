@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import zipfile
@@ -39,7 +40,7 @@ EXCERPT_NAMES = {"CMakeLists.txt", "Allrun", "Makefile", "controlDict", "Dockerf
 MAX_LISTED = 150
 MAX_EXCERPT_FILES = 20
 EXCERPT_LINES = 40
-EXCERPT_BUDGET = 9000
+EXCERPT_BUDGET = 7000
 
 SYSTEM_PROMPT = """\
 You configure "benchmantic", a tool that writes a semantic description and
@@ -58,8 +59,9 @@ software as JSON.
 
 Rules:
 - Use only keys documented in the template; values must use only the
-  options listed there (formats: ini, foam_dict, python; run.type: program,
-  case_folder, script; metrics.from: json_keys, variables; label:
+  options listed there (formats: ini, foam_dict, python, json; run.type:
+  program, case_folder, script, parameter_file; metrics.from: json_keys,
+  variables; label:
   markdown_title, cpp_class, main_file; description: markdown_section,
   doxygen, main_file; executable.from: cmake, entry, none).
 - When the inputs are numbers written in the code of a Python script or
@@ -68,6 +70,14 @@ Rules:
   variables with metrics.values: {metric name: Python expression over the
   code's variables when it ends, e.g. "max(C_D)"}, choosing the quantities
   the benchmark compares (see the code and its comments).
+- When each case is one parameter file (e.g. parameters_1.json,
+  parameters_05.json, possibly in a folder above the program), use
+  cases.files with their pattern (and cases.folder where they are, relative
+  to the implementation folder), the matching inputs.format (json for JSON
+  files), and -- when the program is given the file on its command line --
+  run.type parameter_file with a run.command that passes {parameter_file}
+  and writes the metrics to {metrics_file} (join steps such as making a
+  mesh first with &&).
 - Keep every setting the user fixed exactly as given.
 - All paths are relative to the repository folder shown, and every file you
   name must exist there (or inside a zip listed there, for case files).
@@ -108,7 +118,7 @@ Return the JSON array with the one description object now.
 
 
 #: At most this many example descriptions go into the prompt.
-MAX_EXAMPLES = 3
+MAX_EXAMPLES = 2
 
 
 def _examples(name: str | None) -> str:
@@ -182,7 +192,10 @@ def _read_excerpt(p: Path) -> list[str]:
     return p.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-def _excerpts(root: Path, files: list[Path], focus: Path | None = None) -> str:
+def _excerpts(root: Path, files: list[Path], focus: Path | None = None, base: Path | None = None) -> str:
+    def shown(p: Path) -> str:      # relative to the folder the user pointed at, as the listing
+        return os.path.relpath(p, base or root)
+
     def rank(p: Path) -> tuple:
         name = p.name.lower()
         inside = focus is not None and (focus in p.parents or p == focus)
@@ -194,7 +207,7 @@ def _excerpts(root: Path, files: list[Path], focus: Path | None = None) -> str:
     if focus is not None and focus.is_file() and focus.suffix in (".py", ".ipynb"):
         try:
             outline = _outline(focus)
-            out.append(f"--- {focus.relative_to(root)} (the file the user pointed at: outline)\n{outline}")
+            out.append(f"--- {shown(focus)} (the file the user pointed at: outline)\n{outline}")
             used += len(outline)
         except (OSError, ValueError, SyntaxError):
             pass
@@ -208,7 +221,7 @@ def _excerpts(root: Path, files: list[Path], focus: Path | None = None) -> str:
             break
         used += len(text)
         more = f"\n    ... ({len(lines) - EXCERPT_LINES} more lines)" if len(lines) > EXCERPT_LINES else ""
-        out.append(f"--- {p.relative_to(root)}\n{text}{more}")
+        out.append(f"--- {shown(p)}\n{text}{more}")
     return "\n\n".join(out)
 
 
@@ -223,18 +236,25 @@ def check(spec: dict[str, Any], root: Path, args: Any) -> list[str]:
     if (spec.get("inputs") or {}).get("format") not in FORMATS:
         problems.append(f"inputs.format must be one of {', '.join(FORMATS)}")
     linked_file = getattr(args, "implementation_path", None) and (root / args.implementation_path).is_file()
-    if not (spec.get("cases") or {}).get("marker") and not linked_file:
-        problems.append("cases.marker is missing")
+    cases = spec.get("cases") or {}
+    if not cases.get("marker") and not cases.get("files") and not linked_file:
+        problems.append("cases.marker (a file marking a case folder) or cases.files (one case per file) is missing")
     run = spec.get("run") or {}
     run_type = run.get("type")
     if run_type not in RUN_TYPES:
         problems.append(f"run.type must be one of {', '.join(RUN_TYPES)}")
     required = {"program": ("command", "input_argument"),
                 "case_folder": ("command", "command_without_script", "set_value_command"),
-                "script": ("command",)}.get(run_type, ())
+                "script": ("command",),
+                "parameter_file": ("command",)}.get(run_type, ())
     missing = [k for k in required if not run.get(k)]
     if missing:
         problems.append(f"run ({run_type}) needs: {', '.join(missing)}")
+    if run_type == "parameter_file":
+        if "{parameter_file}" not in str(run.get("command", "")):
+            problems.append("run.command (parameter_file) must pass {parameter_file} to the program")
+        if not cases.get("files"):
+            problems.append("run.type parameter_file needs cases.files (the pattern of the per-case parameter files)")
     if run_type == "script" and (spec.get("inputs") or {}).get("format") != "python":
         problems.append("run.type script needs inputs.format python (the inputs are constants in the code)")
     metrics = spec.get("metrics") or {}
@@ -291,16 +311,41 @@ def _write_cache(path: Path, spec: dict[str, Any], wanted_hash: str, root: Path)
                     encoding="utf-8")
 
 
+#: Where descriptions of repositories cloned only for one run are kept (the
+#: clone is deleted afterwards), relative to the folder benchmantic runs in.
+PERSISTENT_DIR = Path("outputs") / ".software_descriptions"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_").lower() or "software"
+
+
+def cache_path(root: Path, args: Any) -> Path:
+    """Where the accepted description is cached: next to the benchmark --
+    or, for a repository cloned just for this run, in outputs/.software_descriptions/
+    under a name made from the link, so the next run finds it again."""
+    from metadata.repo_source import is_ephemeral_clone
+
+    source = getattr(args, "repository_source", None)
+    if not (source and is_ephemeral_clone(root)):
+        return root / CACHE_NAME
+    name = "_".join(filter(None, [source.split("://")[-1], getattr(args, "repository_ref", None),
+                                  getattr(args, "implementation_path", None)]))
+    PERSISTENT_DIR.mkdir(parents=True, exist_ok=True)
+    return PERSISTENT_DIR / f"{_slug(name)}.yaml"
+
+
 def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
     """The full software description: `settings` (what is already known,
     kept as given) plus the LLM's proposal for everything else, checked on
     the repository."""
-    from ai.inference import DEFAULT_PROVIDER, DEFAULT_TPM_BUDGET, _query_llm_json_array
+    from ai.inference import DEFAULT_PROVIDER, DEFAULT_TPM_BUDGET
+    from ai.inference import _query_llm_json_array as _ask_llm
     from software.generic import merge_specs
 
     label = settings.get("name") or "this benchmark"
     wanted = user_hash(settings)
-    cache = root / CACHE_NAME
+    cache = cache_path(root, args)
     if not getattr(args, "clear_cache", False):
         cached = _read_cache(cache, wanted)
         if cached is not None:
@@ -311,14 +356,16 @@ def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
     focus = root / inner if inner and (root / inner).exists() else None
     base = root if focus is None else focus if focus.is_dir() else focus.parent
     listing, files = _listing(base)
-    if base != root:      # paths relative to the repository, as the description needs them
-        prefix = base.relative_to(root)
-        listing = [line if line.startswith((" ", "...")) else str(prefix / line) for line in listing]
+    if base != root:      # the folder above too: case files and shared scripts often sit there
+        above = sorted(p for p in base.parent.iterdir() if p.is_file() and not p.name.startswith("."))[:40]
+        listing += [f"../{p.name}" for p in above]
+        files += [p for p in above if p.suffix in (".json", ".ini", ".input", ".yaml", ".yml")][:3]
     pointed = "" if focus is None else (
         "=====================\nthe user pointed at\n=====================\n"
         f"{inner} -- a {'file' if focus.is_file() else 'folder'} in the repository: the implementation is "
         "there and benchmantic starts from it (so with a file, `implementation` and `cases.marker` may be "
-        "left out). Only that folder is listed below.\n\n")
+        "left out). Only that folder is listed below, with the files of the folder above it as ../<name>; "
+        "paths in the description are relative to that folder (e.g. cases.folder: \"..\").\n\n")
     base_prompt = PROMPT_TEMPLATE.format(
         pointed=pointed,
         template=(Path(__file__).resolve().parent / "template.yaml").read_text(encoding="utf-8"),
@@ -326,7 +373,7 @@ def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
         user_json=json.dumps(settings, indent=2),
         root_name=root.name,
         listing="\n".join(listing),
-        excerpts=_excerpts(root, files, focus),
+        excerpts=_excerpts(root, files, focus, base),
         errors="{errors}",
     )
 
@@ -342,21 +389,27 @@ def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
     for attempt in range(1, ATTEMPTS + 1):
         print(f"\nAsking {provider} to write the software description for {label} "
               f"(attempt {attempt}/{ATTEMPTS})...")
-        proposal = _query_llm_json_array(
-            provider=provider,
-            model=getattr(args, "model", None),
-            system_prompt=SYSTEM_PROMPT,
-            prompt=base_prompt.replace("{errors}", errors_text),
-            item_count=1,
-            item_label="software description",
-            validator=one_object,
-            retries=3,
-            retry_delay=2.0,
-            verbose=getattr(args, "verbose", False),
-            debug=getattr(args, "debug", False),
-            tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
-            allow_model_fallback=not getattr(args, "no_model_fallback", False),
-        )[0]
+        try:
+            proposal = _ask_llm(
+                provider=provider,
+                model=getattr(args, "model", None),
+                system_prompt=SYSTEM_PROMPT,
+                prompt=base_prompt.replace("{errors}", errors_text),
+                item_count=1,
+                item_label="software description",
+                validator=one_object,
+                retries=3,
+                retry_delay=2.0,
+                verbose=getattr(args, "verbose", False),
+                debug=getattr(args, "debug", False),
+                tpm_budget=getattr(args, "inference_tpm_budget", DEFAULT_TPM_BUDGET),
+                allow_model_fallback=not getattr(args, "no_model_fallback", False),
+            )[0]
+        except RuntimeError as exc:
+            sys.exit(f"Error: the LLM could not write the software description for {label}: {exc}\n"
+                     "See the provider's messages above for why (a used-up quota, a key or account "
+                     "problem, ...). Fix that and run again, or give a description of your own with "
+                     "`software_description:` in the run config.")
         spec = merge_specs(proposal, settings)
         problems = check(spec, root, args)
         if not problems:
@@ -370,7 +423,10 @@ def complete(root: Path, settings: dict[str, Any], args: Any) -> dict[str, Any]:
                        "=====================\n" + json.dumps(proposal, indent=2) + "\n\nproblems:\n- "
                        + "\n- ".join(problems) + "\n")
 
-    failed = cache.with_name(CACHE_NAME.replace(".yaml", ".failed.yaml"))
+    failed = cache.with_name(cache.name.replace(".yaml", ".failed.yaml"))
+    if cache.parent == PERSISTENT_DIR:          # next to the outputs, where it is easy to find
+        failed = Path.cwd() / "outputs" / f"{_slug(label)}_software_description.failed.yaml"
+        failed.parent.mkdir(parents=True, exist_ok=True)
     _write_cache(failed, spec, wanted, root)
     sys.exit(f"Error: no working software description for {label} after {ATTEMPTS} attempts. "
              f"The last proposal is in {failed}; fix it and point the run config's "

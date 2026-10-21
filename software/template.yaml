@@ -25,6 +25,10 @@ cases:
   nested: true                       # cases may sit inside another case
   ids: path                          # path: cases/fine -> cases_fine | folder_name: fine
   zips: false                        # also look for cases inside *.zip
+  # files: "parameters_*.json"       # instead of a marker: each file matching this is one
+                                     #   case (id: what * matched, e.g. "05"); with inputs.format
+                                     #   json (or ini) the file is read as the case's inputs
+  # folder: ".."                     # files: where they are, relative to the implementation
 
 # Files read for license (SPDX headers), name and description, relative to
 # the implementation folder; or {input_files_named: [...]} to use some of
@@ -32,7 +36,8 @@ cases:
 sources: [main.py]
 
 inputs:
-  format: ini                        # a reader in software/formats/: ini | foam_dict | python
+  format: ini                        # a reader in software/formats/: ini | foam_dict | python | json
+                                     # json: entries of a JSON file; {"value": .., "unit": ..} is one input
                                      # python: top-level constants in a script or notebook
                                      #   (r = 0.05, dt = 1 / 1600, Constant(mesh, 0.001))
   files: [parameters.ini]            # ini, python: the input file(s) of a case; python:
@@ -80,6 +85,10 @@ run:                                 # how one case is run, in the container
                                      # case_folder: inputs written into the case's files, then it is run
                                      # script: a Python script or notebook, inputs written into a copy
                                      #   of its code (python format), then the copy is run
+                                     # parameter_file: the program is given the case's parameter
+                                     #   file (cases.files), e.g. command: "python3 run.py
+                                     #   --input_parameter_file {parameter_file} --output_metrics_file
+                                     #   {metrics_file}" -- {configuration} is the case's name
   # script: main.py                  # script: the file to run (default: the linked file)
                                      #   command: "python3 {script}" -- {script} is the prepared copy
   results_folder: /shared            # folder in the container where results are saved

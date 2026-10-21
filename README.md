@@ -86,9 +86,23 @@ pip install roc-validator
 
 - Python 3.10+
 - [Snakemake](https://snakemake.github.io/) and Docker, for running the generated workflow
-- An API key for the LLM inference step, set as an environment variable:
-  - `GROQ_API_KEY` — default provider, free tier ([console.groq.com/keys](https://console.groq.com/keys))
-  - `OPENAI_API_KEY` — used when `--provider openai` is passed
+- An LLM. Name it in the run config -- `llm_provider: groq`, `claude`, `openai` or `claude-code`;
+  `llm_model` is optional.
+  - `claude-code` uses Claude through [Claude Code](https://code.claude.com/docs/en/setup) (the `claude`
+    command), signed in with your Claude Pro or Max plan: no API key and no API credits; the questions
+    count against the plan's usage limits, shared with claude.ai. Install Claude Code and run `claude`
+    once to sign in. Default model `sonnet` (`llm_model: opus` also works).
+  - The others need an API key, given in one of three ways -- never in the run config, which gets shared:
+    - in the environment: `export LLM_API_KEY=<key>` (the provider's usual variable --
+      `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` -- works too, and is the way when
+      several configs use different LLMs);
+    - on the command line: `python3 workflow.py --config my-run.yaml --llm-api-key <key>`;
+    - or when asked during the run (not shown while typed, used for that run only).
+
+  Keys: [Groq](https://console.groq.com/keys) (free tier), [Claude](https://platform.claude.com/settings/keys)
+  (API credits, billed separately from a claude.ai plan), [OpenAI](https://platform.openai.com/api-keys).
+  Without `llm_provider`, the first LLM whose usual variable is set is used. Default models:
+  `openai/gpt-oss-120b` (groq), `claude-sonnet-5-5` (claude), `gpt-4o` (openai).
 
 ## Quick Start
 
@@ -158,7 +172,7 @@ verbose: true
 | `software` | the simulation software's name, e.g. `DuMux` (default: the LLM works it out) |
 | `container` | the container image the simulation runs in (required) |
 | `reference` | an existing description of the same benchmark; `none` to use none (default: looked for) |
-| `llm_model`, `llm_provider` | which LLM to ask (default: groq and its default model) |
+| `llm_provider`, `llm_model` | which LLM to ask -- `groq`, `claude`, `openai` or `claude-code` (your Claude plan, no API key; default: the first whose key variable is set) -- and optionally which of its models |
 | `review_below_confidence` | you review every LLM answer less sure than this (default 0.7) |
 | `verbose` | show more detail while running |
 | `software_description` | your own description of the software (see below) |
@@ -203,6 +217,16 @@ needs neither an input file nor a metrics file (input format `python`,
   description), else found in the code: values it prints
   (`print(f"Drag: {C_D}")` -> `drag`) and arrays it fills in a loop (their
   largest and last value; arrays of times are left out).
+- *One parameter file per case*: when each configuration is a file such as
+  `parameters_05.json` (input format `json`: every entry is an input, an
+  object `{"value": 0.33, "unit": "m"}` one input with its unit), the
+  description says `cases.files: "parameters_*.json"` (and `cases.folder`
+  when they sit elsewhere, e.g. `..`); with `run.type: parameter_file` the
+  Snakefile writes the case's parameter file -- the template's, with the
+  mapped values set and its layout kept -- and runs `run.command` with
+  `{parameter_file}` and `{metrics_file}` in it. Metrics a script
+  `json.dump`s as a dict named like `metrics` count even when the file name
+  comes from the command line.
 - *Workflow*: the Snakefile copies the implementation folder (next to the
   Snakefile, else the folder it was described from, else a clone of the
   linked repository at that branch, made on the first run), writes the

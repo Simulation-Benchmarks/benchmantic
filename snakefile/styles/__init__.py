@@ -19,12 +19,13 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from snakefile.styles import case_files, command_line, python_script
+from snakefile.styles import case_files, command_line, parameter_file, python_script
 
 STYLES: dict[str, ModuleType] = {
     "command_line": command_line,
     "case_files": case_files,
     "python_script": python_script,
+    "parameter_file": parameter_file,
 }
 
 

@@ -36,7 +36,7 @@ import os
 import re
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openai import APIStatusError, BadRequestError, NotFoundError, OpenAI, OpenAIError, RateLimitError
 
@@ -49,7 +49,7 @@ from ai.prompts import (
 )
 from ai.validation import extract_json_array, validate_metadata, validate_metric_metadata
 
-PROVIDER_CONFIG: dict[str, dict[str, str]] = {
+PROVIDER_CONFIG: dict[str, dict[str, Any]] = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_env": "GROQ_API_KEY",
@@ -69,7 +69,7 @@ PROVIDER_CONFIG: dict[str, dict[str, str]] = {
         # access and its rate limits:
         #   curl -s https://api.groq.com/openai/v1/models \
         #     -H "Authorization: Bearer $GROQ_API_KEY" | python3 -m json.tool
-        "default_model": "groq/compound-mini",
+        "default_model": "openai/gpt-oss-120b",
         "signup_url": "https://console.groq.com/keys",
     },
     "openai": {
@@ -78,9 +78,89 @@ PROVIDER_CONFIG: dict[str, dict[str, str]] = {
         "default_model": "gpt-4o",
         "signup_url": "https://platform.openai.com/api-keys",
     },
+    # Claude through Anthropic's OpenAI-compatible endpoint (see
+    # https://docs.claude.com/en/api/openai-sdk): the same client code, a
+    # Claude API key and a Claude model name. Its per-minute limits are far
+    # higher than Groq's free tier, so the default budget is larger too.
+    "claude": {
+        "base_url": "https://api.anthropic.com/v1/",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "default_model": "claude-sonnet-5-5",
+        "signup_url": "https://platform.claude.com/settings/keys",
+        "tpm_budget": 30000,
+        "max_tokens": 8192,
+    },
+    # Claude through Claude Code (the `claude` command), signed in with a
+    # Claude Pro/Max plan: the questions count against the plan's usage
+    # limits instead of needing API credits. No key.
+    # Claude through Claude Code (the `claude` command), signed in with a
+    # Claude Pro/Max plan: the questions count against the plan's usage
+    # limits instead of needing API credits. No key.
+    "claude-code": {
+        "base_url": "",
+        "api_key_env": "",
+        "default_model": "sonnet",
+        "signup_url": "https://code.claude.com/docs/en/setup",
+        "tpm_budget": 200000,
+    },
 }
 
 DEFAULT_PROVIDER = "groq"
+#: Without llm_provider, the first of these whose API key is set is used.
+PROVIDER_ORDER = ("groq", "claude", "openai")
+#: Names people use for a provider -> its name here.
+PROVIDER_ALIASES = {"anthropic": "claude", "chatgpt": "openai", "claude_code": "claude-code", "claudecode": "claude-code"}
+
+
+#: One variable for the key of whichever LLM is chosen (also set by the
+#: --llm-api-key option); each provider's usual variable works too.
+KEY_ENV = "LLM_API_KEY"
+
+
+def provider_name(requested: str) -> str:
+    name = PROVIDER_ALIASES.get(str(requested).strip().lower(), str(requested).strip().lower())
+    if name not in PROVIDER_CONFIG:
+        raise SystemExit(f"Error: unknown llm_provider {requested!r}; choose one of {', '.join(PROVIDER_CONFIG)}.")
+    return name
+
+
+def api_key(provider: str) -> str | None:
+    """The chosen LLM's key: --llm-api-key / LLM_API_KEY, else the
+    provider's usual variable (GROQ_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY)."""
+    env = PROVIDER_CONFIG[provider]["api_key_env"]
+    return os.environ.get(KEY_ENV) or (os.environ.get(env) if env else None) or None
+
+
+def _provider_key(provider: str) -> str | None:
+    env = PROVIDER_CONFIG[provider]["api_key_env"]
+    return (os.environ.get(env) if env else None) or None
+
+
+def choose_provider(requested: str | None) -> str:
+    """The LLM to ask: the one named in the run config (llm_provider), else
+    the first in PROVIDER_ORDER whose usual key variable is set, else the
+    default (its key is then asked for when it is needed)."""
+    if requested:
+        return provider_name(requested)
+    return next((p for p in PROVIDER_ORDER if _provider_key(p)), DEFAULT_PROVIDER)
+
+
+def _ask_for_key(provider: str) -> str | None:
+    """The provider's API key, asked for on a terminal (not shown while
+    typed, kept for this run only); None without a terminal."""
+    config = PROVIDER_CONFIG[provider]
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    print(f"\nNo API key for {provider}. Get one at {config['signup_url']}.")
+    import getpass
+
+    key = getpass.getpass(f"Paste your {provider} API key (not shown; used for this run only), "
+                          "or press Enter to stop: ").strip()
+    if not key:
+        return None
+    os.environ[config["api_key_env"]] = key                 # for the rest of this run
+    return key
+
 
 #: Fallback wait (seconds) when a token-rate-limit response doesn't tell us
 #: how long to wait. Deliberately longer than a full minute -- these are
@@ -424,25 +504,84 @@ def _discover_alternate_model(client: OpenAI, provider: str, exclude: set[str]) 
     return (general + narrow)[0]
 
 
+class _ClaudeCodeClient:
+    """Answers chat.completions.create() with the `claude` command (Claude
+    Code) in print mode, so it signs in with the user's Claude Pro/Max plan.
+    No tools, no project settings: a plain question and answer."""
+
+    def __init__(self) -> None:
+        import shutil
+
+        self.command = shutil.which("claude")
+        if not self.command:
+            raise RuntimeError("llm_provider claude-code needs Claude Code: install it "
+                               "(https://code.claude.com/docs/en/setup) and sign in once with `claude` "
+                               "using your Claude Pro or Max account.")
+        self.chat = self
+        self.completions = self
+        self.models = self
+
+    def list(self):                                  # no other models to switch to
+        return type("Listing", (), {"data": []})()
+
+    def create(self, *, model, messages, **_):
+        import subprocess
+        import tempfile
+
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        prompt = "\n\n".join(m["content"] for m in messages if m["role"] != "system")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", KEY_ENV)}   # use the plan, not API credits
+        with tempfile.TemporaryDirectory(prefix="benchmantic_claude_") as folder:
+            done = subprocess.run(
+                [self.command, "-p", "--output-format", "json", "--model", model, "--system-prompt", system,
+                 "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands"],
+                input=prompt, capture_output=True, text=True, cwd=folder, env=env, timeout=900, check=False)
+        try:
+            reply = json.loads(done.stdout)
+        except ValueError:
+            raise RuntimeError(f"Claude Code failed (exit {done.returncode}): "
+                               f"{(done.stderr or done.stdout).strip()[:500]}") from None
+        if reply.get("is_error") or done.returncode != 0:
+            raise RuntimeError(f"Claude Code failed: {str(reply.get('result') or done.stderr).strip()[:500]} -- "
+                               "is `claude` signed in with your Claude plan (run `claude` once)?")
+        usage = reply.get("usage") or {}
+        tokens = sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens"))
+        message = type("Message", (), {"content": str(reply.get("result") or "")})()
+        return type("Response", (), {
+            "choices": [type("Choice", (), {"message": message})()],
+            "usage": type("Usage", (), {"prompt_tokens": int(usage.get("input_tokens") or 0),
+                                        "completion_tokens": int(usage.get("output_tokens") or 0),
+                                        "total_tokens": tokens})() if usage else None,
+        })()
+
+
 def get_client(provider: str = DEFAULT_PROVIDER) -> OpenAI:
     """
     Create an OpenAI-compatible client for the given provider.
 
-    Requires the provider's API key env var to be set
-    (GROQ_API_KEY for Groq, OPENAI_API_KEY for OpenAI).
+    The key comes from --llm-api-key / LLM_API_KEY or the provider's usual
+    environment variable, else it is asked for (see api_key()).
     """
     if provider not in PROVIDER_CONFIG:
         raise ValueError(f"Unknown provider '{provider}'. Choose from: {', '.join(PROVIDER_CONFIG)}")
 
+    if provider == "claude-code":
+        return _ClaudeCodeClient()   # type: ignore[return-value]
     config = PROVIDER_CONFIG[provider]
-    api_key = os.environ.get(config["api_key_env"])
-    if not api_key:
+    key = api_key(provider) or _ask_for_key(provider)
+    if not key:
         raise RuntimeError(
-            f"{config['api_key_env']} is not set in the environment. "
-            f"Get a free key at {config['signup_url']}."
+            f"No API key for {provider}. Get one at {config['signup_url']}, then give it with "
+            f"--llm-api-key <key>, or set {KEY_ENV} (or {config['api_key_env']}) in the environment."
         )
 
-    return OpenAI(api_key=api_key, base_url=config["base_url"])
+    headers = {}
+    if provider == "claude" and os.environ.get("ANTHROPIC_WORKSPACE_ID"):
+        # a key that works across workspaces needs the workspace named in
+        # every request (https://platform.claude.com/settings/workspaces)
+        headers["anthropic-workspace-id"] = os.environ["ANTHROPIC_WORKSPACE_ID"]
+    return OpenAI(api_key=key, base_url=config["base_url"], default_headers=headers or None)
 
 
 
@@ -489,8 +628,33 @@ def _error_body(exc: OpenAIError) -> dict:
 _MODEL_UNUSABLE_CODES = {"model_terms_required", "model_not_active", "model_decommissioned"}
 
 
+#: A 400 saying the request doesn't fit the model's context window, e.g.
+#: Groq's "Please reduce the length of the messages or completion." for a
+#: small model -- another model may well have a larger window.
+_CONTEXT_TOO_SMALL = re.compile(r"reduce the length|context length|context window|maximum context", re.IGNORECASE)
+
+
+def _error_message(exc: OpenAIError) -> str:
+    body = _error_body(exc)
+    return str(body.get("message") or exc)
+
+
+def _account_problem(provider: str, exc: OpenAIError) -> str | None:
+    """What to do when the account or key, not the request, is the problem
+    (retrying or another model can't help); None otherwise."""
+    message = _error_message(exc).lower()
+    if "workspace" in message and ("scoped" in message or "workspace-id" in message):
+        return ("This API key works across several workspaces: create a key for one workspace at "
+                "https://platform.claude.com/settings/keys and use that one.")
+    if "credit balance" in message or "add credits" in message or "billing" in message:
+        url = "https://platform.claude.com/settings/billing" if provider == "claude" else "the provider's billing page"
+        return f"The API account has no credits: add some at {url} (an API account is billed separately)."
+    return None
+
+
 def _is_model_unusable(exc: OpenAIError) -> bool:
-    return _error_body(exc).get("code") in _MODEL_UNUSABLE_CODES
+    body = _error_body(exc)
+    return body.get("code") in _MODEL_UNUSABLE_CODES or bool(_CONTEXT_TOO_SMALL.search(str(body.get("message", ""))))
 
 
 def _is_rate_or_size_limited(exc: OpenAIError) -> bool:
@@ -819,10 +983,13 @@ def _query_llm_json_array_one_model(
             if debug:
                 print(f"\n--- Request (attempt {attempt}/{retries}) ---")
             start = time.monotonic()
+            extra = {"max_tokens": PROVIDER_CONFIG[provider]["max_tokens"]} \
+                if "max_tokens" in PROVIDER_CONFIG[provider] else {}
             response = client.chat.completions.create(
                 model=resolved_model,
                 messages=messages,
                 temperature=0,
+                **extra,
             )
             elapsed = time.monotonic() - start
             usage = getattr(response, "usage", None)
@@ -868,6 +1035,10 @@ def _query_llm_json_array_one_model(
             raise _ModelUnusable(resolved_model, exc) from exc
 
         except BadRequestError as exc:
+            hint = _account_problem(provider, exc)
+            if hint:
+                limiter.record_actual(entry, 0)
+                raise RuntimeError(f"{provider} refused the request: {_error_message(exc)}\n{hint}") from exc
             if _is_model_unusable(exc):
                 # e.g. Groq's "model_terms_required" -- this model needs an
                 # org admin to accept its terms before it can be used at
@@ -1007,6 +1178,8 @@ def _query_llm_json_array(
     for exactly the problem this feature exists to solve.
     """
     client = get_client(provider)
+    if tpm_budget == DEFAULT_TPM_BUDGET:          # not set by the user: the provider's own default
+        tpm_budget = int(PROVIDER_CONFIG[provider].get("tpm_budget", tpm_budget))
     tried: set[str] = set()
     last_daily_error: _DailyQuotaExhausted | None = None
     last_failure_kind: str | None = None  # "daily" or "output" -- whichever happened LAST, for the final message
@@ -1027,7 +1200,13 @@ def _query_llm_json_array(
     last_unusable_error: _ModelUnusable | None = None
 
     while True:
-        resolved_model = model or _ACTIVE_MODEL.get(provider) or PROVIDER_CONFIG[provider]["default_model"]
+        # the pinned model, unless it already failed (quota, unusable output)
+        # in this run -- then the model switched to, else the default
+        exhausted = _EXHAUSTED_MODELS.get(provider, set())
+        resolved_model = (model if model and model not in exhausted else None) \
+            or _ACTIVE_MODEL.get(provider) or PROVIDER_CONFIG[provider]["default_model"]
+        if resolved_model in tried:
+            break           # never ask a model again that already failed in this call
         tried.add(resolved_model)
         try:
             return _query_llm_json_array_one_model(

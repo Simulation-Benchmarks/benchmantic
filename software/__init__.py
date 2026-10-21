@@ -96,6 +96,18 @@ def resolve(root: Path, name: str | None, args: Any = None) -> SoftwareAdapter:
         if name and not settings.get("name"):
             settings["name"] = name
         source = str(description)
+        # a partial description of a software benchmantic knows: on top of
+        # benchmantic's own (e.g. only `metrics:` for one benchmark)
+        known = find_description(settings["name"]) if settings.get("name") else None
+        if known:
+            from software.generic import merge_specs
+
+            merged = merge_specs(load_description(str(known)), settings)
+            if not autoconfig.check(merged, root, args):
+                if verbose:
+                    print(f"Software: {settings['name']} (description: {source} on top of "
+                          f"{known.relative_to(ROOT)})")
+                return GenericAdapter.from_spec(merged)()
     else:
         known = find_description(name) if name and description != ASK_LLM else None
         if not name and not description:

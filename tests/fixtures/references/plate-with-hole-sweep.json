@@ -1,0 +1,710 @@
+{
+  "@context": {
+    "local": "https://github.com/Simulation-Benchmarks/linear-elastic-plate-with-hole/",
+    "@vocab": "http://w3id.org/nfdi4ing/metadata4ing#",
+    "bm": "https://w3id.org/nfdi4ing/benchmarks/",
+    "m4i": "http://w3id.org/nfdi4ing/metadata4ing#",
+    "mathmod": "https://mardi4nfdi.github.io/MathModDB/",
+    "schema": "https://schema.org/",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "cr": "http://mlcommons.org/croissant/",
+    "obo": "http://purl.obolibrary.org/obo/",
+    "qudt": "http://qudt.org/schema/qudt/",
+    "sio": "http://semanticscience.org/resource/",
+    "unit": "https://qudt.org/vocab/unit/",
+    "wd": "http://www.wikidata.org/entity/",
+    "doi": "https://doi.org/",
+    "quantitykind": "http://qudt.org/vocab/quantitykind/",
+    "label": {
+      "@id": "rdfs:label"
+    },
+    "Field": {
+      "@id": "cr:Field"
+    },
+    "file object": {
+      "@id": "cr:FileObject"
+    },
+    "numerical variable": {
+      "@id": "m4i:NumericalVariable"
+    },
+    "text variable": {
+      "@id": "m4i:TextVariable"
+    },
+    "processing step": {
+      "@id": "m4i:ProcessingStep"
+    },
+    "configuration": {
+      "@id": "m4i:Configuration"
+    },
+    "tool": {
+      "@id": "m4i:Tool"
+    },
+    "has part": {
+      "@id": "obo:BFO_0000051"
+    },
+    "has input": {
+      "@id": "obo:RO_0002233"
+    },
+    "has output": {
+      "@id": "obo:RO_0002234"
+    },
+    "has employed tool": {
+      "@id": "m4i:hasEmployedTool"
+    },
+    "has parameter set": {
+      "@id": "m4i:hasParameterSet"
+    },
+    "has unit": {
+      "@id": "m4i:hasUnit"
+    },
+    "investigates": {
+      "@id": "m4i:investigates"
+    },
+    "represents": {
+      "@id": "sio:SIO_000210"
+    },
+    "source": {
+      "@id": "cr:source"
+    },
+    "has numerical value": {
+      "@id": "m4i:hasNumericalValue"
+    },
+    "has string value": {
+      "@id": "m4i:hasStringValue"
+    },
+    "extract": {
+      "@id": "cr:extract"
+    },
+    "jsonPath": {
+      "@id": "cr:jsonPath"
+    },
+    "uses": {
+      "@id": "wd:P2283"
+    },
+    "describedAsDocumentedBy": {
+      "@id": "mathmod:P104"
+    },
+    "has configuration": {
+      "@id": "m4i:usesConfiguration"
+    },
+    "has quantity kind": {
+      "@id": "m4i:hasKindOfQuantity"
+    },
+    "evaluates": {
+      "@id": "m4i:evaluates"
+    }
+  },
+  "@graph": [
+    {
+      "@id": "bm:linear-elastic-plate-with-hole",
+      "@type": "m4i:Benchmark",
+      "label": "linear-elastic plate with hole",
+      "investigates": {
+        "@id": "https://portal.mardi4nfdi.de/entity/Q6775295"
+      },
+      "uses": {
+        "@id": "https://portal.mardi4nfdi.de/entity/Q6775296"
+      },
+      "evaluates": [
+        {
+          "@id": "local:metric_number_of_dofs"
+        },
+        {
+          "@id": "local:metric_max_von_mises_stress"
+        },
+        {
+          "@id": "local:metric_l2_error_displacement"
+        },
+        {
+          "@id": "local:metric_max_displacement_error"
+        },
+        {
+          "@id": "local:metric_reaction_force_left_boundary_x"
+        },
+        {
+          "@id": "local:metric_reaction_force_left_boundary_y"
+        },
+        {
+          "@id": "local:metric_displacement_top_right_corner"
+        }
+      ],
+      "has parameter set": [
+        {
+          "@id": "local:configuration_all"
+        }
+      ],
+      "describedAsDocumentedBy": {
+        "@id": "doi:10.xxxxx/xxxx"
+      },
+      "schema:version": "1.1.0"
+    },
+    {
+      "@id": "https://portal.mardi4nfdi.de/entity/Q6775295",
+      "@type": "mathmod:ResearchProblem",
+      "label": "Plate with a hole"
+    },
+    {
+      "@id": "https://portal.mardi4nfdi.de/entity/Q6775296",
+      "@type": "mathmod:MathematicalModel",
+      "label": "plate with a hole: linear elasticity model"
+    },
+    {
+      "@id": "local:field_max_von_mises_stress",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:metric_max_von_mises_stress"
+      },
+      "source": {
+        "@id": "local:source_max_von_mises_stress"
+      }
+    },
+    {
+      "@id": "local:metric_max_von_mises_stress",
+      "@type": "numerical variable",
+      "label": "max_von_mises_stress",
+      "has unit": {
+        "@id": "unit:PA"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Stress"
+      }
+    },
+    {
+      "@id": "local:source_max_von_mises_stress",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/max_von_mises_stress/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_max_displacement_error",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:metric_max_displacement_error"
+      },
+      "source": {
+        "@id": "local:source_max_displacement_error"
+      }
+    },
+    {
+      "@id": "local:metric_max_displacement_error",
+      "@type": "numerical variable",
+      "label": "max_displacement_error",
+      "has unit": {
+        "@id": "unit:M"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Displacement"
+      }
+    },
+    {
+      "@id": "local:source_max_displacement_error",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/max_displacement_error/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_l2_error_displacement",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:variable_l2_error_displacement"
+      },
+      "source": {
+        "@id": "local:source_l2_error_displacement"
+      }
+    },
+    {
+      "@id": "local:metric_l2_error_displacement",
+      "@type": "numerical variable",
+      "label": "l2_error_displacement",
+      "has unit": {
+        "@id": "unit:M"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Displacement"
+      }
+    },
+    {
+      "@id": "local:source_l2_error_displacement",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/l2_error_displacement/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_reaction_force_left_boundary_x",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:metric_reaction_force_left_boundary_x"
+      },
+      "source": {
+        "@id": "local:source_reaction_force_left_boundary_x"
+      }
+    },
+    {
+      "@id": "local:metric_reaction_force_left_boundary_x",
+      "@type": "numerical variable",
+      "label": "reaction_force_left_boundary_x",
+      "has unit": {
+        "@id": "unit:N"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Force"
+      }
+    },
+    {
+      "@id": "local:source_reaction_force_left_boundary_x",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/reaction_force_left_boundary_x/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_reaction_force_left_boundary_y",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:metric_reaction_force_left_boundary_y"
+      },
+      "source": {
+        "@id": "local:source_reaction_force_left_boundary_y"
+      }
+    },
+    {
+      "@id": "local:metric_reaction_force_left_boundary_y",
+      "@type": "numerical variable",
+      "label": "reaction_force_left_boundary_y",
+      "has unit": {
+        "@id": "unit:N"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Force"
+      }
+    },
+    {
+      "@id": "local:source_reaction_force_left_boundary_y",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/reaction_force_left_boundary_y/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_displacement_top_right_corner",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Text"
+      },
+      "represents": {
+        "@id": "local:metric_displacement_top_right_corner"
+      },
+      "source": {
+        "@id": "local:source_displacement_top_right_corner"
+      }
+    },
+    {
+      "@id": "local:metric_displacement_top_right_corner",
+      "@type": "numerical variable",
+      "label": "displacement_top_right_corner",
+      "has unit": {
+        "@id": "unit:M"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Displacement"
+      }
+    },
+    {
+      "@id": "local:source_displacement_top_right_corner",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/displacement_top_right_corner/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:field_number_of_dofs",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Double"
+      },
+      "represents": {
+        "@id": "local:metric_number_of_dofs"
+      },
+      "source": {
+        "@id": "local:source_number_of_dofs"
+      }
+    },
+    {
+      "@id": "local:metric_number_of_dofs",
+      "@type": "numerical variable",
+      "label": "number_of_dofs",
+      "has unit": {
+        "@id": "unit:UNITLESS"
+      },
+      "has quantity kind": {
+        "@id": "quantitykind:Count"
+      }
+    },
+    {
+      "@id": "local:source_number_of_dofs",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/number_of_dofs/"
+      },
+      "file object": {
+        "@id": "local:summary_file_object"
+      }
+    },
+    {
+      "@id": "local:simulation_run",
+      "@type": "processing step",
+      "label": "Simulation run",
+      "has input": [
+        {
+          "@id": "local:parameter_file_object"
+        }
+      ],
+      "has output": [
+        {
+          "@id": "local:summary_file_object"
+        }
+      ],
+      "has configuration": [
+        {
+          "@id": "local:configuration_all"
+        }
+      ]
+    },
+    {
+      "@id": "local:parameter_file_object",
+      "@type": "cr:FileObject",
+      "encodingFormat": "application/json",
+      "label": "parameter.json"
+    },
+    {
+      "@id": "local:summary_file_object",
+      "@type": "cr:FileObject",
+      "encodingFormat": "application/json",
+      "label": "solution_metrics.json"
+    },
+    {
+      "@id": "local:variable_radius",
+      "@type": "numerical variable",
+      "label": "radius",
+      "has numerical value": 0.33,
+      "has unit": {
+        "@id": "unit:M"
+      }
+    },
+    {
+      "@id": "local:field_radius",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_radius"
+      },
+      "source": {
+        "@id": "local:source_radius"
+      }
+    },
+    {
+      "@id": "local:source_radius",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/radius[m]"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_length",
+      "@type": "numerical variable",
+      "label": "length",
+      "has numerical value": 1.0,
+      "has unit": {
+        "@id": "unit:M"
+      }
+    },
+    {
+      "@id": "local:field_length",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_length"
+      },
+      "source": {
+        "@id": "local:source_length"
+      }
+    },
+    {
+      "@id": "local:source_length",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/length[m]"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_load",
+      "@type": "numerical variable",
+      "label": "load",
+      "has numerical value": 100e6,
+      "has unit": {
+        "@id": "unit:PA"
+      }
+    },
+    {
+      "@id": "local:field_load",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_load"
+      },
+      "source": {
+        "@id": "local:source_load"
+      }
+    },
+    {
+      "@id": "local:source_load",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/load[Pa]"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_element_size",
+      "@type": "numerical variable",
+      "label": "element_size",
+      "has numerical value": [0.1, 0.003125],
+      "has unit": {
+        "@id": "unit:M"
+      }
+    },
+    {
+      "@id": "local:field_element_size",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_element_size"
+      },
+      "source": {
+        "@id": "local:source_element_size"
+      }
+    },
+    {
+      "@id": "local:source_element_size",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/element_size[m]"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_isoparametric_element_degree",
+      "@type": "numerical variable",
+      "label": "isoparametric_element_degree",
+      "has unit": {
+        "@id": "unit:UNITLESS"
+      },
+      "has numerical value": [1, 2]
+    },
+    {
+      "@id": "local:field_isoparametric_element_degree",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Integer"
+      },
+      "represents": {
+        "@id": "local:variable_isoparametric_element_degree"
+      },
+      "source": {
+        "@id": "local:source_isoparametric_element_degree"
+      }
+    },
+    {
+      "@id": "local:source_isoparametric_element_degree",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/isoparametric_element_degree"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_cell_type",
+      "@type": "text variable",
+      "label": "cell_type",
+      "has unit": {
+        "@id": "unit:UNITLESS"
+      },
+       "has string value": ["triangle", "quadrilateral"]
+    },
+    {
+      "@id": "local:field_cell_type",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Text"
+      },
+      "represents": {
+        "@id": "local:variable_cell_type"
+      },
+      "source": {
+        "@id": "local:source_cell_type"
+      }
+    },
+    {
+      "@id": "local:source_cell_type",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/cell_type"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_youngs_modulus",
+      "@type": "numerical variable",
+      "label": "youngs_modulus",
+      "has numerical value": 210e9,
+      "has unit": {
+        "@id": "unit:PA"
+      }
+    },
+    {
+      "@id": "local:field_youngs_modulus",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_youngs_modulus"
+      },
+      "source": {
+        "@id": "local:source_youngs_modulus"
+      }
+    },
+    {
+      "@id": "local:source_youngs_modulus",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/youngs_modulus[Pa]"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:variable_poissons_ratio",
+      "@type": "numerical variable",
+      "label": "poissons_ratio",
+      "has unit": {
+        "@id": "unit:UNITLESS"
+      },
+      "has numerical value": 0.3
+    },
+    {
+      "@id": "local:field_poissons_ratio",
+      "@type": "Field",
+      "dataType": {
+        "@id": "schema:Float"
+      },
+      "represents": {
+        "@id": "local:variable_poissons_ratio"
+      },
+      "source": {
+        "@id": "local:source_poissons_ratio"
+      }
+    },
+    {
+      "@id": "local:source_poissons_ratio",
+      "@type": "cr:DataSource",
+      "extract": {
+        "jsonPath": "/poissons_ratio"
+      },
+      "file object": {
+        "@id": "local:parameter_file_object"
+      }
+    },
+    {
+      "@id": "local:configuration_all",
+      "@type": "m4i:ParameterSet",
+      "label": "Element Sizes: [0.1, 0.003125], Isoparametric Element Degree: [1, 2]",
+      "identifier": "all",
+      "has part": [
+        {
+          "@id": "local:variable_radius"
+        },
+        {
+          "@id": "local:variable_length"
+        },
+        {
+          "@id": "local:variable_load"
+        },
+        {
+          "@id": "local:variable_element_size"
+        },
+        {
+          "@id": "local:variable_isoparametric_element_degree"
+        },
+        {
+          "@id": "local:variable_cell_type"
+        },
+        {
+          "@id": "local:variable_youngs_modulus"
+        },
+        {
+          "@id": "local:variable_poissons_ratio"
+        }
+      ]
+    }
+  ]
+}

@@ -18,6 +18,9 @@ also reads parameter nodes typed m4i:NumericalVariable that carry a value
 
 from __future__ import annotations
 
+import itertools
+import re
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -63,6 +66,34 @@ def _description(graph: Graph, node) -> str:
     return ""
 
 
+_WEB_FILE = re.compile(r"^https?://(?P<host>[^/]+)/(?P<repo>.+?)/(?:-/)?(?:blob|raw)/(?P<rest>.+)$")
+
+
+def fetch_reference(text: str) -> Path:
+    """A reference given as a link: downloaded to a temporary file. A link
+    to a file's page on GitHub/GitLab (.../blob/<branch>/<path>) is read from
+    its raw form. Anything else is a local path."""
+    if not re.match(r"^https?://", text):
+        return Path(text).expanduser()
+    import tempfile
+    import urllib.request
+
+    url = text
+    m = _WEB_FILE.match(text)
+    if m and m.group("host") == "github.com":
+        url = f"https://raw.githubusercontent.com/{m.group('repo')}/{m.group('rest')}"
+    elif m:
+        url = f"https://{m.group('host')}/{m.group('repo')}/-/raw/{m.group('rest')}"
+    target = Path(tempfile.mkdtemp(prefix="benchmantic_reference_")) / (url.rsplit("/", 1)[-1] or "reference.json")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:   # noqa: S310 -- the user's own link
+            target.write_bytes(response.read())
+    except OSError as exc:
+        raise SystemExit(f"Error: could not download the reference benchmark {text} ({url}): {exc}") from None
+    print(f"Reference benchmark downloaded from {url}")
+    return target
+
+
 def load_reference(path: Path) -> ReferenceBenchmark:
     graph = Graph()
     try:
@@ -76,22 +107,28 @@ def load_reference(path: Path) -> ReferenceBenchmark:
     ref = ReferenceBenchmark(path=path, label=str(graph.value(benchmark, RDFS.label) or "") or None)
 
     for pset in sorted(graph.objects(benchmark, M4I.hasParameterSet), key=str):
-        values: dict[str, Any] = {}
+        # each part's value(s); a part with several values makes the set a
+        # sweep: one configuration per combination, as semantic_benchmark's
+        # BenchmarkLoader expands it (parts by IRI, values by their N3 form,
+        # identifiers "<id>--1", "<id>--2", ...)
+        choices: list[tuple[str, list[Any], str]] = []
         for part in graph.objects(pset, HAS_PART):
             name = graph.value(part, RDFS.label)
             if name is None:
                 continue
             name = str(name)
-            num = graph.value(part, M4I.hasNumericalValue)
-            txt = graph.value(part, M4I.hasStringValue)
-            if isinstance(num, Literal):
-                value = num.toPython()
-                datatype = "schema:Integer" if isinstance(value, int) and not isinstance(value, bool) else "schema:Float"
-            elif txt is not None:
-                value, datatype = str(txt), "schema:String"
+            nums = [t for t in sorted(graph.objects(part, M4I.hasNumericalValue), key=lambda t: t.n3())
+                    if isinstance(t, Literal)]
+            txts = sorted(graph.objects(part, M4I.hasStringValue), key=lambda t: t.n3())
+            if nums:
+                options = [t.toPython() for t in nums]
+                datatype = ("schema:Integer" if all(isinstance(v, int) and not isinstance(v, bool) for v in options)
+                            else "schema:Float")
+            elif txts:
+                options, datatype = [str(t) for t in txts], "schema:String"
             else:
                 continue
-            values[name] = value
+            choices.append((name, options, str(part)))
             info = ref.parameters.setdefault(name, {
                 "unit": _short(graph, graph.value(part, M4I.hasUnit)) or "unit:UNITLESS",
                 "quantityKind": _short(graph, graph.value(part, M4I.hasKindOfQuantity)),
@@ -101,11 +138,17 @@ def load_reference(path: Path) -> ReferenceBenchmark:
             if info["datatype"] == "schema:Integer" and datatype == "schema:Float":
                 info["datatype"] = "schema:Float"
         ident = graph.value(pset, M4I.identifier)
-        ref.configurations.append({
-            "id": str(ident) if ident is not None else str(pset).rsplit("/", 1)[-1],
-            "label": str(graph.value(pset, RDFS.label) or ident or ""),
-            "values": values,
-        })
+        base_id = str(ident) if ident is not None else str(pset).rsplit("/", 1)[-1]
+        label = str(graph.value(pset, RDFS.label) or ident or "")
+        by_iri = sorted(choices, key=lambda c: c[2])           # the expansion order (part IRIs)
+        combinations = list(itertools.product(*(options for _, options, _ in by_iri)))
+        for index, combination in enumerate(combinations, start=1):
+            chosen = {name: value for (name, _, _), value in zip(by_iri, combination)}
+            ref.configurations.append({
+                "id": base_id if len(combinations) == 1 else f"{base_id}--{index}",
+                "label": label if len(combinations) == 1 else f"{label} ({index}/{len(combinations)})",
+                "values": {name: chosen[name] for name, _, _ in choices},   # in the file's order
+            })
 
     for metric in graph.objects(benchmark, M4I.evaluates):
         name = graph.value(metric, RDFS.label)

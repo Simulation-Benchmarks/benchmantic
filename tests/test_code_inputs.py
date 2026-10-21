@@ -228,3 +228,29 @@ def test_the_llm_describes_an_unknown_software_from_the_linked_file(tmp_path, mo
     assert module_dir == root / "examples" and adapter.main_file.name == NOTEBOOK
     assert "the file the user pointed at: outline" in prompts[0] and "k = 0.5" in prompts[0]
     assert [m.key for m in adapter.discover_metrics(module_dir, root)] == ["final_temperature"]
+
+
+def test_a_printed_dict_is_one_metric_per_entry():
+    code = "x = 1.0\nresult = {'numeric': x, 'exact': 2 * x}\nprint('result:', result)\n"
+    assert [(k, e) for k, e, _ in python_code.result_variables(code)] == [
+        ("result_numeric", "result['numeric']"), ("result_exact", "result['exact']")]
+
+
+def test_a_partial_description_on_top_of_a_known_one(tmp_path):
+    """Only `metrics:` given for one benchmark: the rest is benchmantic's own
+    FEniCSx description, and no LLM is asked."""
+    import argparse
+
+    import software
+
+    root = tmp_path / "repo"
+    (root / "examples").mkdir(parents=True)
+    code = "L = 1.0\nk = 0.5\nu = 1.0\nfor i in range(10):\n    u = u - 0.1 * k * u\n"
+    (root / "examples" / "beam.py").write_text(code)              # prints nothing: no metrics found by itself
+    partial = tmp_path / "beam.yaml"
+    partial.write_text("name: FEniCSx\nmetrics:\n  from: variables\n  values:\n    final_u: u\n")
+    args = argparse.Namespace(software_description=str(partial), implementation_path="examples/beam.py")
+    adapter = software.resolve(root, "FEniCSx", args)
+    module_dir = adapter.find_module_dir(root, args)
+    assert [m.key for m in adapter.discover_metrics(module_dir, root)] == ["final_u"]
+    assert adapter.run_settings["type"] == "script"                          # from software_descriptions/fenicsx.yaml

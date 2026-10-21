@@ -1,0 +1,17 @@
+name: TestCode
+cases:
+  files: "parameters_*.json"
+  folder: ".."
+inputs:
+  format: json
+  default_selection:
+    sections: ["*"]
+metrics:
+  files: [run_simulation.py]
+label: markdown_title
+description: markdown_section
+executable:
+  from: none
+run:
+  type: parameter_file
+  command: "python3 run_simulation.py --input_parameter_file {parameter_file} --output_metrics_file {metrics_file}"
