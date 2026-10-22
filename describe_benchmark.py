@@ -645,8 +645,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
-    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, croissant_path, snakefile_path,
-                                  review_path)
+    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, croissant_path,
+                                  snakefile_path, review_path)
                       if p is not None]
     _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path

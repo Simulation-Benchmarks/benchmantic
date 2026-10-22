@@ -241,15 +241,19 @@ needs neither an input file nor a metrics file (input format `python`,
   running it needs nothing of benchmantic.
 
 
-**The parameters in Croissant.** Next to the description, every run writes
-`<name>_parameters_croissant.jsonld`: one Croissant `cr:Field` per input parameter, in the style
-semantic-benchmark reads -- the parameter as a numerical or text variable (unit, quantity kind,
-its value, or all its values when the configurations vary it), and a `cr:DataSource` with the
-`jsonPath` of its key in the configuration's parameter file (`/radius[m]`: the name with its unit
-symbol, as the benchmark run writes the file) and a `cr:FileObject` for that file. Each field also
-says where the parameter goes in the implementation (`bm:implementation`: the software's input, its
-file, line and column, and the expression that sets it, from `<name>_mapping.json`). It conforms to
-semantic-benchmark's SHACL shapes.
+**The parameters in Croissant.** Next to the description, every run writes the input parameters
+to `<name>_parameters_croissant.jsonld`, in semantic-benchmark's shape (see its
+`docs/croissant-jsonpath.md`): per parameter a `Field` that `represents` a numerical or text
+variable (label, unit, quantity kind) and has a `source`: a `cr:DataSource` with
+`extract: {jsonPath: "/radius[m]"}` -- the key in the configuration's parameter file -- and
+`file object` the `cr:FileObject` `parameter.json`. That `source` is all semantic-benchmark reads.
+Where the parameter is set in the software is linked from the field with `bm:softwareSource`, in
+the same shape: a `cr:DataSource` whose `extract` has the path to the input in the software's file
+(`/Grid/Radial0` for key `Radial0` in ini section `[Grid]`), `bm:line` and `bm:column`, with
+`bm:input`, `bm:expression` (how the input's value is made from the parameters), and `file object`
+a `cr:FileObject` for that file (label, `contentUrl`, `encodingFormat`, `sha256`; a file of a
+zipped case is `containedIn` the zip). It conforms to semantic-benchmark's SHACL shapes. (It uses
+Croissant's terms the way semantic-benchmark does; it is not a standalone Croissant 1.1 dataset.)
 
 **Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:
 

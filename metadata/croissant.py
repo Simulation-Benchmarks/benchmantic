@@ -5,29 +5,39 @@
 """
 metadata.croissant
 
-The benchmark's input parameters as a Croissant description, one entry per
-parameter, in the style semantic-benchmark reads (see its
-docs/croissant-jsonpath.md):
+The benchmark's input parameters as Croissant, in exactly the shape
+semantic-benchmark uses (see its docs/croissant-jsonpath.md). Per parameter:
 
-    cr:Field ---represents---> numerical / text variable (label, unit, values)
-        \\---source---> cr:DataSource --extract--> {jsonPath: "/radius[m]"}
-                                   \\--file object--> cr:FileObject "parameter.json"
+    {"@id": "local:field_radius", "@type": "Field", "dataType": ...,
+     "represents": {"@id": "local:parameter_radius"},
+     "source": {"@id": "local:source_radius"}},
+    {"@id": "local:parameter_radius", "@type": "numerical variable",
+     "label": "radius", "has unit": ..., "has quantity kind": ...},
+    {"@id": "local:source_radius", "@type": "cr:DataSource",
+     "extract": {"jsonPath": "/radius[m]"},
+     "file object": {"@id": "local:parameter_file_object"}},
+
+and once:
+
+    {"@id": "local:parameter_file_object", "@type": "cr:FileObject",
+     "encodingFormat": "application/json", "label": "parameter.json"}
 
 The jsonPath is the parameter's key in the parameter file a benchmark run
 writes for each configuration: its name, with the unit symbol when it has a
-known one ("/radius[m]"), as run_benchmark.py and the generated Snakefile use it. A
-parameter used with several values (across the configurations) lists them
-all, as a sweep in semantic-benchmark does. Where the parameter goes in the
-implementation -- the software's own input, the file it is in, line and
-column, and the expression that sets it -- comes from the input mapping
-(<name>_mapping.json) and is added to the field as bm:implementation. Each
-of those files is a cr:FileObject too, as the Croissant spec describes files:
-name, contentUrl (a link to it when the implementation came from a
-repository link, else its path in the repository), encodingFormat, sha256;
-a file in a zipped case has containedIn the zip's FileObject.
+known one ("/radius[m]"), as run_benchmark.py and the generated Snakefile use
+it. Semantic-benchmark reads only that `source`.
 
-Built from the files benchmantic writes anyway (the benchmark description
-and the mapping), so it always agrees with them.
+Where the parameter is set in the software is linked from the field with
+bm:softwareSource, in the same shape -- a cr:DataSource with the path to the
+input in the software's file ("/Grid/Radial0" for a key in an ini section),
+its line and column, the expression that makes the input's value, and a
+cr:FileObject for that file (name, contentUrl -- a link when the
+implementation came from a repository link -- encodingFormat, sha256; a file
+of a zipped case is containedIn the zip). It comes from the mapping
+(<name>_mapping.json).
+
+Built from the benchmark description benchmantic writes anyway, so it always
+agrees with it.
 """
 
 from __future__ import annotations
@@ -49,15 +59,6 @@ PARAMETER_TYPES = {"numerical parameter": "numerical variable", "text parameter"
 
 def _ref(node: Any) -> str | None:
     return node.get("@id") if isinstance(node, dict) else None
-
-
-def _values(items: list[Any]) -> Any:
-    """One value, or the different values in the order they first appear."""
-    unique: list[Any] = []
-    for item in items:
-        if item not in unique:
-            unique.append(item)
-    return unique[0] if len(unique) == 1 else unique
 
 
 ENCODINGS = {".json": "application/json", ".ipynb": "application/x-ipynb+json", ".py": "text/x-python",
@@ -94,7 +95,7 @@ class _Files:
     def _node(self, node_id: str, name: str, url: str, checksum: str | None, **more: Any) -> dict[str, str]:
         if node_id not in self.nodes:
             self.nodes[node_id] = {
-                "@id": node_id, "@type": "cr:FileObject", "name": name, "contentUrl": url,
+                "@id": node_id, "@type": "cr:FileObject", "label": name, "name": name, "contentUrl": url,
                 "encodingFormat": ENCODINGS.get(posixpath.splitext(name)[1].lower(), "text/plain"),
                 **({"sha256": checksum} if checksum else {}), **more,
             }
@@ -125,108 +126,120 @@ def _file_id(path: str) -> str:
     return "local:file_" + re.sub(r"[^A-Za-z0-9]+", "_", path).strip("_")
 
 
-def _implementation(mapping: dict[str, Any] | None, name: str, files: _Files) -> list[dict[str, Any]]:
-    """The software inputs a benchmark parameter sets (from the mapping),
-    each with the file it is in (a cr:FileObject), line and column."""
-    found = []
+def _json_path(name: str, unit: str | None, unit_symbols: dict[str, str]) -> str:
+    """"/radius[m]": the key in the configuration's parameter file, in
+    semantic-benchmark's slash-separated path syntax. That syntax splits at
+    every "/", so a unit symbol with one ("rad/s") is left out:
+    semantic-benchmark matches keys with or without their unit suffix
+    anyway ("/omega" finds "omega[rad/s]")."""
+    key = config_key(name, unit, unit_symbols)
+    return "/" + (key if "/" not in key else name)
+
+
+def _software_path(item: dict[str, Any]) -> str:
+    """The input's place in its file, in the same slash path syntax:
+    "/Grid/Radial0" for a key in an ini section, "/geom/r0" or "/radius" when
+    the file itself is the section (OpenFOAM dictionaries, JSON and Python
+    files)."""
+    section, key = item.get("section"), item.get("key") or item.get("input", "")
+    file = (item.get("location") or {}).get("file", "")
+    if not section or section == file or "/" in section or "." in section:
+        return "/" + key.strip("/")
+    return f"/{section}/{key}".replace("//", "/")
+
+
+def _software_sources(mapping: dict[str, Any] | None, name: str, files: "_Files",
+                      sources: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    """The software inputs parameter `name` sets (from the mapping), each a
+    cr:DataSource: the software's file it is in (a cr:FileObject), the path
+    to the input in that file, line, column, and the expression that makes
+    the input's value from the benchmark parameters. Inputs set from several
+    parameters share one data source."""
+    refs = []
     for item in (mapping or {}).get("inputs", []):
-        if name not in item.get("benchmark_parameters", []):
-            continue
-        entry: dict[str, Any] = {"bm:input": item["input"], "bm:expression": item.get("expression")}
         location = item.get("location") or {}
-        if location.get("file"):
-            entry.update({"bm:file": files.ref(location["file"]), "bm:line": location.get("line"),
-                          "bm:column": location.get("column")})
-        found.append({k: v for k, v in entry.items() if v is not None})
-    return found
+        if name not in item.get("benchmark_parameters", []) or not location.get("file"):
+            continue
+        source_id = "local:software_source_" + re.sub(r"[^A-Za-z0-9]+", "_", item["input"]).strip("_")
+        if source_id not in sources:
+            extract = {"jsonPath": _software_path(item), "bm:line": location.get("line"),
+                       "bm:column": location.get("column")}
+            sources[source_id] = {
+                "@id": source_id, "@type": "cr:DataSource",
+                "extract": {k: v for k, v in extract.items() if v is not None},
+                "file object": files.ref(location["file"]),
+                "bm:input": item["input"],
+                **({"bm:expression": item["expression"]} if item.get("expression") else {}),
+            }
+        refs.append({"@id": source_id})
+    return refs
 
 
 def build_parameters_croissant(benchmark: dict[str, Any], mapping: dict[str, Any] | None = None,
                                unit_symbols: dict[str, str] | None = None) -> dict[str, Any]:
     """The Croissant description of the input parameters in `benchmark` (a
-    benchmark description as benchmantic writes it), with `mapping` (its
-    <name>_mapping.json) for where each parameter goes in the implementation.
-    The jsonPath is the key in the configuration's parameter file: the name,
-    with its unit symbol when it has a known one ("/radius[m]"), as the
-    benchmark run writes it (see snakefile.renderer.config_key)."""
+    benchmark description as benchmantic writes it), in semantic-benchmark's
+    shape: per parameter a Field, the variable it represents, and a
+    cr:DataSource with the jsonPath into the configuration's parameter file.
+    With `mapping` (its <name>_mapping.json), each field also has
+    bm:softwareSource: where the parameter is set in the software, in the
+    same DataSource/FileObject shape."""
     unit_symbols = unit_symbols or DEFAULT_UNIT_SYMBOLS
     graph = benchmark.get("@graph", [])
     by_id = {n.get("@id"): n for n in graph if isinstance(n, dict)}
-    file_object = by_id.get("local:parameter_file_object", {"label": "parameter.json"})
+    file_label = by_id.get("local:parameter_file_object", {}).get("label", "parameter.json")
 
-    # the parameter values, by parameter, in configuration order
+    # the parameters, in the order the configurations name them
     order: list[str] = []
     nodes: dict[str, dict[str, Any]] = {}
-    values: dict[str, list[Any]] = {}
-    configurations = [n for n in graph if n.get("@type") == "m4i:ParameterSet"]
-    for configuration in configurations:
+    for configuration in (n for n in graph if n.get("@type") == "m4i:ParameterSet"):
         for part in configuration.get("has part", []):
             node = by_id.get(_ref(part)) or {}
-            if node.get("@type") not in PARAMETER_TYPES:
-                continue
-            name = node["label"]
-            if name not in nodes:
-                order.append(name)
-                nodes[name] = node
-                values[name] = []
-            values[name].append(node.get("has numerical value", node.get("has string value")))
+            if node.get("@type") in PARAMETER_TYPES and node["label"] not in nodes:
+                order.append(node["label"])
+                nodes[node["label"]] = node
 
     # each parameter's field in the description (for its data type)
-    field_of: dict[str, dict[str, Any]] = {}
+    data_type: dict[str, Any] = {}
     for field in (n for n in graph if n.get("@type") == "Field"):
         variable = by_id.get(_ref(field.get("represents"))) or {}
-        name = variable.get("label")
-        if variable.get("@type") not in PARAMETER_TYPES or name in field_of:
-            continue
-        field_of[name] = field
+        if variable.get("@type") in PARAMETER_TYPES and field.get("dataType"):
+            data_type.setdefault(variable.get("label"), field["dataType"])
 
-    out: list[dict[str, Any]] = [{
-        "@id": "local:parameter_file_object", "@type": "cr:FileObject",
-        "encodingFormat": "application/json", "label": file_object.get("label", "parameter.json"),
-        "name": file_object.get("label", "parameter.json"),
-        "dcterms:description": "The parameter file of one benchmark configuration.",
-    }]
+    out: list[dict[str, Any]] = []
     files = _Files((mapping or {}).get("implementation"))
+    sources: dict[str, dict[str, Any]] = {}
     for name in order:
         node, slug = nodes[name], slugify(name)
-        variable = {
-            "@id": f"local:variable_{slug}", "@type": PARAMETER_TYPES[node["@type"]], "label": name,
-            **({"dcterms:description": node["dcterms:description"]} if node.get("dcterms:description") else {}),
-            **({"schema:alternateName": node["schema:alternateName"]} if node.get("schema:alternateName") else {}),
-            "has unit": node.get("has unit", {"@id": "unit:UNITLESS"}),
-            **({"has quantity kind": node["has quantity kind"]} if node.get("has quantity kind") else {}),
-        }
-        key = "has string value" if node["@type"] == "text parameter" else "has numerical value"
-        variable[key] = _values(values[name])
-        field = {
-            "@id": f"local:field_{slug}", "@type": "Field",
-            "dataType": (field_of.get(name) or {}).get("dataType", {"@id": "schema:Float"}),
-            "represents": {"@id": variable["@id"]},
-            "source": {"@id": f"local:source_{slug}"},
-        }
-        where = _implementation(mapping, name, files)
-        if where:
-            field["bm:implementation"] = where
-        out += [variable, field, {
-            "@id": f"local:source_{slug}", "@type": "cr:DataSource",
-            "extract": {"jsonPath": "/" + config_key(name, (variable["has unit"] or {}).get("@id"), unit_symbols)},
-            "file object": {"@id": "local:parameter_file_object"},
-        }]
-
-    out[1:1] = list(files.nodes.values())          # the implementation's files, after the parameter file
+        unit = node.get("has unit") or {"@id": "unit:UNITLESS"}
+        default_type = "schema:Text" if node["@type"] == "text parameter" else "schema:Float"
+        variable = {"@id": f"local:parameter_{slug}", "@type": PARAMETER_TYPES[node["@type"]], "label": name,
+                    "has unit": unit}
+        if node.get("has quantity kind"):
+            variable["has quantity kind"] = node["has quantity kind"]
+        field = {"@id": f"local:field_{slug}", "@type": "Field",
+                 "dataType": data_type.get(name, {"@id": default_type}),
+                 "represents": {"@id": variable["@id"]}, "source": {"@id": f"local:source_{slug}"}}
+        new = set(sources)
+        software = _software_sources(mapping, name, files, sources)
+        if software:
+            field["bm:softwareSource"] = software
+        out += [
+            field,
+            variable,
+            {"@id": f"local:source_{slug}", "@type": "cr:DataSource",
+             "extract": {"jsonPath": _json_path(name, unit.get("@id"), unit_symbols)},
+             "file object": {"@id": "local:parameter_file_object"}},
+        ] + [node for source_id, node in sources.items() if source_id not in new]
+    out.append({"@id": "local:parameter_file_object", "@type": "cr:FileObject",
+                "encodingFormat": "application/json", "label": file_label})
+    out += list(files.nodes.values())                   # the software's files
     context = dict(benchmark.get("@context") or {})
-    context.setdefault("bm", BM)
-    for term in ("contentUrl", "encodingFormat"):    # Croissant's schema.org terms
-        context.setdefault(term, f"schema:{term}")
-    context.setdefault("sha256", "schema:sha256")
-    context.setdefault("containedIn", "cr:containedIn")
-    label = next((n.get("label") for n in graph if n.get("@type") == "m4i:Benchmark"), None)
-    if label:
-        out.insert(0, {"@id": "local:parameters", "@type": "schema:Dataset",
-                       "schema:name": f"Input parameters of the {label} benchmark",
-                       "schema:distribution": [{"@id": "local:parameter_file_object"}]
-                       + [{"@id": i} for i in files.nodes],
-                       "schema:hasPart": [{"@id": f"local:field_{slugify(n)}"} for n in order]})
+    if sources:
+        context.setdefault("bm", BM)
+        for term in ("contentUrl", "encodingFormat", "sha256"):    # Croissant's schema.org terms
+            context.setdefault(term, f"schema:{term}")
+        context.setdefault("containedIn", "cr:containedIn")
     return {"@context": context, "@graph": out}
 
 
