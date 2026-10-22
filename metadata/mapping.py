@@ -180,6 +180,10 @@ class ParameterMapping:
     benchmark_parameters: dict[str, dict[str, Any]]    # name -> {"unit": ..., "quantityKind": ...}
     reference: dict[str, Any] | None = None
     checks: dict[str, Any] = field(default_factory=dict)
+    #: Where the implementation is: {"repository", "ref", "folder" (in the
+    #: repository), "case_folder" (the inputs' locations are relative to it,
+    #: within "folder"), "archive"/"path_in_archive" for a zipped case}.
+    implementation: dict[str, Any] | None = None
 
     @property
     def mapped(self) -> list[InputMapping]:
@@ -199,6 +203,7 @@ class ParameterMapping:
             "inputs": [m.to_json() for m in self.inputs],
             "unused_benchmark_parameters": self.unused_parameters(),
             "checks": self.checks,
+            **({"implementation": self.implementation} if self.implementation else {}),
         }
 
     def write(self, path: Path) -> None:

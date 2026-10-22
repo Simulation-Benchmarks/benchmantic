@@ -119,6 +119,10 @@ def _import_from_clone(candidates):
     return None, None
 
 
+#: Why a clone was used instead of the pip-installed package (for the message).
+_CLONE_REASON = ""
+
+
 def _import_semantics(explicit_src: Path | None):
     """Import semantic_benchmark.semantics: from a clone asked for
     (--semantic-benchmark-src, SEMANTIC_BENCHMARK_SRC), else the
@@ -128,6 +132,9 @@ def _import_semantics(explicit_src: Path | None):
     """
     env = os.environ.get("SEMANTIC_BENCHMARK_SRC")
     asked = explicit_src or (Path(env) if env else None)
+    global _CLONE_REASON
+    _CLONE_REASON = ("asked for with --semantic-benchmark-src" if explicit_src else
+                     "asked for by the SEMANTIC_BENCHMARK_SRC environment variable" if env else "")
     if asked is not None:
         module, used_src = _import_from_clone([asked])
         if module is None:
@@ -137,6 +144,8 @@ def _import_semantics(explicit_src: Path | None):
         try:
             module, used_src = importlib.import_module("semantic_benchmark.semantics"), None
         except ImportError:
+            _CLONE_REASON = (f"semantic-benchmark is not pip-installed for this Python ({sys.executable}); "
+                             f"install it with: {sys.executable} -m pip install semantic-benchmark")
             module, used_src = _import_from_clone(_candidate_src_dirs())
         if module is None:
             sys.exit(
@@ -360,7 +369,7 @@ def run(args: argparse.Namespace) -> int:
     """
     semantics_module, used_src = _import_semantics(args.semantic_benchmark_src)
     if used_src:
-        print(f"(using semantic_benchmark from {used_src}, not the pip-installed package)")
+        print(f"(using semantic_benchmark from {used_src}, not the pip-installed package: {_CLONE_REASON})")
     else:
         print(f"(using semantic_benchmark {_package_version()}, pip-installed)")
 

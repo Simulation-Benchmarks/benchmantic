@@ -1936,6 +1936,8 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
                              mapped_inputs if reference is not None else None)
     mapping_notes = mapping.checks.get("summary", []) if mapping is not None else []
     if mapping is not None:
+        mapping.implementation = _implementation_place(args, adapter, module_dir, module_relative_path)
+        mapping.implementation["sha256"] = _file_checksums(adapter, module_dir, mapping)
         mapping_path = args.output.with_name(args.output.stem + ".mapping.json")
         mapping.write(mapping_path)
         if args.verbose:
@@ -2235,6 +2237,62 @@ def _review_mapping(inputs: list, reference) -> list:
             print(f"Not accepted: {problem}")
             continue
         m.expression, m.explanation, m.confidence = new, "set by the reviewer", 1.0
+
+
+def _file_checksums(adapter, module_dir: Path, mapping) -> dict[str, str]:
+    """{location file: sha256 of its content} for the files the mapped
+    inputs are in (and the zip a template case came from), as Croissant
+    recommends for every FileObject."""
+    import hashlib
+
+    try:
+        template = adapter.template_case(module_dir)
+    except SystemExit:
+        return {}
+    files_mode = bool(getattr(adapter, "_case_files_pattern", lambda: None)())
+    sums: dict[str, str] = {}
+    for item in mapping.inputs:
+        name = (item.location or {}).get("file")
+        if not name or name in sums:
+            continue
+        path = (module_dir if files_mode else template) / name
+        if path.is_file():
+            sums[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    archive = (mapping.implementation or {}).get("archive")
+    if archive and (module_dir / archive).is_file():
+        sums[archive] = hashlib.sha256((module_dir / archive).read_bytes()).hexdigest()
+    return sums
+
+
+def _implementation_place(args, adapter, module_dir: Path, module_relative_path: str | None) -> dict[str, Any]:
+    """Where the implementation and its parameter files are, for the mapping:
+    the repository (and branch) it came from, its folder there, and the
+    folder the inputs' locations are relative to -- or the zip a template
+    case came from."""
+    import os
+
+    place: dict[str, Any] = {"folder": module_relative_path or "."}
+    if getattr(args, "repository_source", None):
+        place["repository"] = args.repository_source
+        if getattr(args, "repository_ref", None):
+            place["ref"] = args.repository_ref
+    if getattr(adapter, "_case_files_pattern", lambda: None)():
+        place["case_folder"] = "."                 # locations name the case file from the implementation folder
+        return place
+    try:
+        template = adapter.template_case(module_dir)
+    except SystemExit:
+        return place
+    case_folder = Path(os.path.relpath(template, module_dir)).as_posix()
+    place["case_folder"] = case_folder
+    parts = Path(case_folder).parts
+    if parts and parts[0] == ".benchmantic":        # unpacked from a zip (see GenericAdapter._extract_zip)
+        zips = {z.stem: z for z in adapter.case_zips(module_dir)}
+        zip_path = zips.get(parts[1]) if len(parts) > 1 else None
+        if zip_path is not None:
+            place["archive"] = Path(os.path.relpath(zip_path, module_dir)).as_posix()
+            place["path_in_archive"] = Path(*parts[2:]).as_posix() if len(parts) > 2 else "."
+    return place
 
 
 def _build_mapping(args, adapter, reference, fields: dict[str, Any], raw_candidates, mapped_inputs):

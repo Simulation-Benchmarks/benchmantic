@@ -121,6 +121,7 @@ import metadata.builder as builder  # noqa: E402
 import show_description  # noqa: E402
 import snakefile.generator as generator  # noqa: E402
 import snakefile.styles as snakefile_styles  # noqa: E402
+from metadata.croissant import write_parameters_croissant  # noqa: E402
 from metadata.graph import load_graph  # noqa: E402
 
 REQUIRED_FLAGS = ("module_dir", "container_image")
@@ -154,6 +155,11 @@ def derive_benchmark_filename(by_id: dict) -> str:
     if "benchmark" in slug:
         return f"{slug}.jsonld"
     return f"{slug}_benchmark.jsonld"
+
+
+def croissant_filename_for(benchmark_filename: str) -> str:
+    """'rotating_cylinders_benchmark.jsonld' -> 'rotating_cylinders_parameters_croissant.jsonld'."""
+    return mapping_filename_for(benchmark_filename).replace("_mapping.json", "_parameters_croissant.jsonld")
 
 
 def mapping_filename_for(benchmark_filename: str) -> str:
@@ -578,6 +584,16 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
             print(f"-> Wrote {mapping_path}")
     shutil.rmtree(staging_dir, ignore_errors=True)
 
+    # The input parameters in Croissant (one cr:Field per parameter, with its
+    # jsonPath in the parameter file and where it goes in the implementation;
+    # see metadata.croissant) -- made from the description and the mapping.
+    croissant_path: Path | None = None
+    if benchmark_path is not None and benchmark_path.exists():
+        croissant_path = output_dir / croissant_filename_for(benchmark_filename)
+        count = write_parameters_croissant(benchmark_path, mapping_path, croissant_path)
+        if args.verbose or args.debug:
+            print(f"-> Wrote {croissant_path} ({count} parameters)")
+
     # 2. Snakefile -- generated into a throwaway workdir alongside the
     # per-case preview parameters.json files (neither of those is part of
     # the deliverable), then just the Snakefile itself is moved into
@@ -629,7 +645,8 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
         f"cd {output_dir} && python3 run_benchmark.py "
         f"--benchmark-file {benchmark_filename} --result-path ./results"
     )
-    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, snakefile_path, review_path)
+    artifact_paths = [p for p in (benchmark_path, dataset_path, mapping_path, croissant_path, snakefile_path,
+                                  review_path)
                       if p is not None]
     _print_summary_box(benchmark_label, stats, output_dir, artifact_paths, run_cmd)
     return benchmark_path, dataset_path, snakefile_path

@@ -16,6 +16,7 @@ snakefile/styles/. The config comes from the run config (software.resolve).
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import sys
 import zipfile
@@ -382,7 +383,18 @@ class GenericAdapter(SoftwareAdapter):
         """Step: identify the parameters in the parameter file, each with
         its location in that file (ParameterCandidate.location)."""
         settings = self.input_settings(module_dir)
-        candidates = self._format.discover(self.template_case(module_dir), settings)
+        template = self.template_case(module_dir)
+        candidates = self._format.discover(template, settings)
+        if self._case_files_pattern():
+            # one case per file: the location names the file itself
+            # (../parameters_1.json), not its copy in .benchmantic/cases/
+            original = next((p for d, p in ((d, self.case_sources.get(cid)) for d, cid in
+                             self.discover_cases(module_dir)) if d == template and p), None)
+            if original is not None:
+                shown = os.path.relpath(original, module_dir)
+                for c in candidates:
+                    if c.location and c.location.file == self._case_file_name():
+                        c.location.file = shown
         hints = settings.get("code_hints")
         if hints:
             texts = [read_text(module_dir / name) for name in hints.get("files") or []]
