@@ -18,3 +18,19 @@ path = "tests/fixtures/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
 SPDX-License-Identifier = "MIT"
+
+# The bundled examples (examples/). Their DuMux sources carry their own
+# GPL-3.0-or-later headers, which take precedence ("closest"); the rest --
+# run configs, write-ups, reviewed metadata -- is covered here.
+[[annotations]]
+path = "examples/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"
+
+# The files of a generated benchmark repository (create_benchmark_repo.py), without
+# headers of their own: the generated repository's REUSE.toml licenses them there.
+[[annotations]]
+path = "repository_template/**"
+SPDX-FileCopyrightText = "2026 Simulation-Benchmarks"
+SPDX-License-Identifier = "MIT"

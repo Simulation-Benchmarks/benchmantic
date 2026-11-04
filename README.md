@@ -1,379 +1,257 @@
 # benchmantic
 
-Generates a shareable, machine-readable semantic description (RO-Crate JSON-LD) from a simulation benchmark's source code, and packages a ready-to-run Snakemake workflow around it. Supports **DuMux** and **OpenFOAM** implementations; parameters are described with software-neutral names, with a per-software mapping to each code's own inputs.
+benchmantic reads the source code of a simulation benchmark and writes a
+machine-readable description of it (JSON-LD: parameters, configurations,
+metrics, with units), a Snakemake workflow that runs it in a container, and,
+if you like, a whole benchmark repository like
+[rotating-cylinders](https://github.com/Simulation-Benchmarks/rotating-cylinders)
+-- on GitHub, with its CI.
 
-## Pipeline diagram
+An LLM works out what each input and output means (name, unit, quantity kind);
+you review its answers, and they are stored, so a benchmark is described the
+same way every time.
 
 ```
-local folder or git URL
-  (DuMux: params.input + C++ source; OpenFOAM: case
-   dictionaries + post-processing script; README, build config)
-        │
-        ▼
-describe_benchmark.py
-  discover → infer → review → build → validate
-        │
-        ├─▶ <name>_benchmark.jsonld
-        │     RO-Crate / semantic description
-        │     (parameters, metrics, processing steps)
-        ├─▶ <name>_dataset.jsonld
-        │     dataset provenance (author, publisher,
-        │     software dependencies)
-        ├─▶ <name>_mapping.json
-        │     benchmark parameters -> this software's
-        │     inputs (expressions, checks)
-        └─▶ Snakefile
-              plain file, container-ready
-
-        │
-        ├─▶ show_description.py
-        │     renders both jsonld files as Markdown tables
-        └─▶ verify_description.py
-              validates <name>_benchmark.jsonld against semantic_benchmark
-
-workflow.py runs all of the above in one command
+implementation (folder or GitHub/GitLab link)
+   │
+   ├─ workflow.py ──────────── describe ─▶ outputs/<software>/
+   │                           verify       <name>_benchmark.jsonld   the description
+   │                                        <name>_dataset.jsonld     authors, license, dependencies
+   │                                        <name>_mapping.json       parameters -> software inputs
+   │                                        Snakefile                 runs every configuration
+   │                                        review.md                 everything as tables
+   │
+   └─ create_benchmark_repo.py ──────────▶ a benchmark repository (optionally on GitHub)
 ```
 
-## Features
-
-- Works from a local checkout or a remote source alike: `<module_dir>` accepts a local folder path, or a GitHub/GitLab/any git-reachable URL, cloned into a throwaway temp directory that's deleted once the run finishes (pass `--keep-clone` to reuse a persistent local clone across runs instead).
-- Discovers input parameters and output metrics directly from source -- for DuMux `params.input`, `main.cc`, `problem.hh`; for OpenFOAM the case dictionaries (`system/`, `constant/`, `0/`, including template placeholders like `{omega}`) and the post-processing script that writes `solution_metrics.json` -- plus license, dependencies, build info, citation, and author details from `README`/`AUTHORS`/`CMakeLists.txt`. See [Supported software and parameter names](#supported-software-and-parameter-names).
-- Uses an LLM (Groq or OpenAI) to infer each parameter's and metric's semantic name, datatype, QUDT unit, and quantity kind — grounded in a compact `getParam<Type>()` call-site excerpt from the C++ source (not the raw config key name alone, and not the whole file). Three layers keep this within a provider's tokens-per-minute budget instead of relying on retries after the fact: requests are estimated and batched below both an item-count cap (`--inference-batch-size`) and a token-size target (`--inference-tpm-budget`), and every request reserves its estimated cost against one shared budget across the whole run so a burst of small requests can't collectively exceed it either.
-- Parameter selection: which discovered `params.input` entries actually go into the run. On a real terminal, a wide enough window (100+ columns) and a long enough list (more than a dozen candidates -- the motivating case is a benchmark with 30+ parameters) show a two-column checkbox screen: items numbered straight down the left column, then continuing down the right (e.g. 1-19 left, 20-38 right for 38 parameters) instead of one long list you'd otherwise have to scroll all the way through, with a live "Selected N/total" badge in the top corner and a running list of exactly what's checked, by name, at the bottom. `↑`/`↓` move within the current column and wrap there, `Tab` (or `←`/`→`) hops the highlight to the matching row in the other column, Space toggles, and typing a number jumps straight to that item wherever it lands, same as elsewhere in this tool. A shorter list or a narrower terminal uses a single scrolling column instead (the same layout the Outputs step's own small "Custom" toggle screen always uses) -- a mostly-empty second column would just look broken for a handful of items. Falls back to a plain-text "type index numbers to toggle" table when curses isn't usable at all.
-- Interactive review step: before anything is built into the graph, parameters AND metrics go through one combined review pass. On a real terminal, this is a curses screen showing only the items that actually need a look (low confidence, or a structural flag unrelated to the AI's own confidence) — everything else is auto-accepted and just counted, with Accept/Rename/Change unit/Change type/Change quantity kind/Edit explanation per item, chosen with arrow keys or a single digit press (`1`-`7`); falls back automatically to a plain-text table (same idea, `--skip-review`-friendly) when curses isn't usable (no real TTY, e.g. piped/CI output) or you back out of it with `q`.
-- Quiet by default: normal output is a handful of `✓`/`○` checklist lines plus a final boxed summary (benchmark name, parameter/metric/case counts, validation status, generated files, the next command to run) instead of a raw dump of every discovery/inference detail. Pass `-v`/`--verbose` for the detail behind that (resolved paths, per-request LLM headers), or `--debug` for the exact request/response text of every LLM call on top of that.
-- The interactive run is framed as six numbered steps (`1/6 Discover benchmark` … `6/6 Validate`), each announced with a short banner, so it's always clear which part of the pipeline is running -- these banners print regardless of `--verbose`/`--debug`. First run against a real terminal opens with a one-screen explanation of what the tool produces ("Press Enter to continue…"); non-interactive/CI runs (`--scenario-params` + `--skip-review`, or non-TTY) skip it automatically.
-- Outputs step: which artifacts to actually write is its own explicit decision, made right after parameter selection (step `3/6`) and BEFORE any LLM call -- a run that only wants a Snakefile can say so before paying for semantic inference on a single parameter, instead of that choice being an afterthought tacked on right before generation. The benchmark description and the review report are generated for every preset except one; the dataset-provenance sidecar and the Snakefile are the two "Custom"-reachable choices. On a real terminal, a wide enough window (roughly 92+ columns) shows an "info panel" of cards across the top -- one per artifact (Benchmark description, Dataset description, Reproducible workflow, Review report), each with its file-type badge (`JSON-LD`/`Snakefile`/`Markdown`) and a one-line purpose -- followed by a two-pane picker below it: presets (Standard / Workflow + Description / **Workflow only** / Description only / Description + Dataset / Custom, "Standard" marked `[Recommended]`) on the left, and a live "Preset preview" on the right that updates with every arrow keypress -- a ✓/✗ row per artifact with its actual filename (or "(skipped)"), plus the preset's own one-line summary -- so exactly what Enter is about to confirm is always visible before you press it; there's no separate "Generate these files? [Y/n]" prompt afterward on this path, since the preview already showed it. A narrower or shorter terminal falls back to a single-column preset menu (same card panel on top, same preset descriptions, same scrolling behavior as before) instead of squeezing two columns into a window that can't comfortably fit them -- the highlighted option is always kept on-screen, `↑`/`↓` (or a digit) move the highlight past the visible edge and the view follows, and a "(more below)"/"(more above)" hint in the footer says when there's more to see. **Workflow only** is the one preset that turns semantic inference itself off: no Groq/OpenAI call, no `benchmark.jsonld`, no dataset sidecar, no `review.md` -- just a Snakefile built directly from parameter values discovered statically from `params.input`, with a real limitation attached (see [Config files](#config-files) below for the unit-suffix caveat this carries); it's deliberately not reachable from "Custom" (a dataset sidecar has nothing to link back to without a benchmark file, so Custom always keeps the description on -- use this dedicated preset instead), and still opens its own checkbox toggle screen with a plain-text "Generate these files? [Y/n]" confirmation afterward, since that path has no live preview of its own. The choice is remembered per module (`.benchmantic_outputs.json`, beside the existing `.parameter_metadata_cache.json`) so a later run against the same module doesn't ask again; override any run with `--outputs <preset>` (`standard`/`snakefile`/`snakefile-only`/`dataset`/`description-only`/`none`) or `--outputs dataset,snakefile` (see `--help` for the full list), which also skips the prompt and preview entirely -- useful for CI.
-- Cross-benchmark corrections memory: whenever a reviewer edits an AI-inferred value, that correction is remembered and offered back to the LLM as guidance the next time a similarly named/typed parameter shows up, even in a different benchmark module.
-- Caches inferred (and reviewed) metadata on disk so repeated runs don't re-query the API, and prunes stale cache entries automatically.
-- Assembles a [metadata4ing](https://w3id.org/nfdi4ing/metadata4ing)/RO-Crate 1.1-conformant `@graph` describing the benchmark, its parameter sets, metrics, and license, split across two files: `<benchmark-name>_benchmark.jsonld` (what `semantic_benchmark.BenchmarkLoader` reads) and a sidecar `<benchmark-name>_dataset.jsonld` (author, publisher, software dependencies).
-- Generates a plain `Snakefile` from that graph (not zipped).
-- Renders the generated description as human-readable Markdown tables for manual review (merging in the sidecar dataset file automatically), with confidence scores and unit/quantityKind mix-ups flagged.
-- Validates the generated benchmark description against the SHACL shapes shipped with `semantic_benchmark` (`BenchmarkLoader.load_shapes()`), then loads it with the real `semantic_benchmark.BenchmarkLoader` for the runtime checks the shapes can't express.
-- Ships a single `workflow.py` command that runs the whole pipeline and mirrors the verification step's exit code, so it's CI-safe.
-
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/Simulation-Benchmarks/benchmantic.git
 cd benchmantic
-pip install groq rdflib pyyaml
+pip install -r requirements.txt     # openai, pyyaml, rdflib, semantic-benchmark
+pip install reuse                   # for create_benchmark_repo.py
+pip install roc-validator           # optional: RO-Crate 1.1 check of the description
 ```
 
-`pyyaml` reads the run config and the software descriptions (see [The software description](#the-software-description)).
+Python 3.10 or newer. Running the generated workflow needs Snakemake and
+Apptainer (or Docker).
 
-`groq` is the default LLM provider (free tier). To use OpenAI instead, install `openai` and pass `--provider openai` (with `--model`, if you want something other than its default) to `describe_benchmark.py`/`workflow.py`:
+## Quick start
+
+Try the example -- Taylor-Couette flow (rotating cylinders) with DuMux, from the
+[DuMux benchmark list](https://dumux.org/docs/doxygen/master/benchmarks.html):
 
 ```bash
-pip install openai
+python3 workflow.py --config examples/taylor-couette-flow/benchmantic.yaml
+python3 create_benchmark_repo.py --config examples/taylor-couette-flow/benchmantic.yaml
 ```
 
-`verify_description.py` needs the `semantic_benchmark` package, which provides the SHACL shapes and pulls in `rdflib` and `pyshacl`:
+The first command writes `outputs/dumux/` and checks the description; the
+second writes the repository to `outputs/repositories/taylor-couette-flow/`.
+The example's reviewed LLM answers are stored with it, so this needs no LLM key.
 
-```bash
-pip install semantic-benchmark
-```
-
-The pip-installed package is always used, so `pip install -U semantic-benchmark` keeps the shapes current; each run prints the version it validated with. To try changes to the shapes from a local clone of semantic-benchmark, pass `--semantic-benchmark-src <clone>` (or set `SEMANTIC_BENCHMARK_SRC`). A clone next to benchmantic is used only when the package isn't installed.
-
-Optionally, install [`roc-validator`](https://github.com/crs4/rocrate-validator) to enable the automatic RO-Crate 1.1 conformance check that runs after generation:
-
-```bash
-pip install roc-validator
-```
-
-## Requirements
-
-- Python 3.10+
-- [Snakemake](https://snakemake.github.io/) and Docker, for running the generated workflow
-- An LLM. Name it in the run config -- `llm_provider: groq`, `claude`, `openai`, `claude-code` or
-  `codex`; `llm_model` is optional.
-  - `claude-code` uses Claude through [Claude Code](https://code.claude.com/docs/en/setup) (the `claude`
-    command), signed in with your Claude Pro or Max plan: no API key and no API credits; the questions
-    count against the plan's usage limits, shared with claude.ai. Install Claude Code and run `claude`
-    once to sign in. Default model `sonnet` (`llm_model: opus` also works).
-  - `codex` uses OpenAI's models through [Codex](https://developers.openai.com/codex/quickstart) (the
-    `codex` command), signed in with your ChatGPT plan: no API key and no API credits; the questions
-    use the plan's included usage. Install Codex and run `codex` once to sign in. Without `llm_model`,
-    Codex's own default model.
-  - The others need an API key, given in one of three ways -- never in the run config, which gets shared:
-    - in the environment: `export LLM_API_KEY=<key>` (the provider's usual variable --
-      `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` -- works too, and is the way when
-      several configs use different LLMs);
-    - on the command line: `python3 workflow.py --config my-run.yaml --llm-api-key <key>`;
-    - or when asked during the run (not shown while typed, used for that run only).
-
-  Keys: [Groq](https://console.groq.com/keys) (free tier), [Claude](https://platform.claude.com/settings/keys)
-  (API credits, billed separately from a claude.ai plan), [OpenAI](https://platform.openai.com/api-keys).
-  Without `llm_provider`, the first LLM whose usual variable is set is used. Default models:
-  `openai/gpt-oss-120b` (groq), `claude-sonnet-5-5` (claude), `gpt-4o` (openai).
-
-## Quick Start
-
-Copy `run-config-template.yaml`, fill in three lines, and run it:
+For your own benchmark, write a run config:
 
 ```yaml
-# rotating-cylinders.yaml
-implementation: /path/to/rotating-cylinders     # your code: a folder, or a git URL
-software: DuMux                                 # the simulation software it uses
-container: registry.example.org/rotating-cylinders:3.1   # the container image it runs in
+implementation: /path/to/your/benchmark   # a folder, or a GitHub/GitLab link
+software: DuMux                           # the simulation software
+container: registry.example.org/my-benchmark:1.0   # the image it runs in
 ```
 
-```bash
-python3 workflow.py --config rotating-cylinders.yaml
-```
+and run `python3 workflow.py --config my-benchmark.yaml`. benchmantic shows
+the inputs it found and asks which ones differ between configurations, asks
+the LLM what they mean, and shows you its answers to review.
 
-That's all benchmantic needs. It knows DuMux and OpenFOAM; for any other
-software it asks the LLM how that software organises a benchmark (see
-[The software description](#the-software-description)). The same settings
-also work as command-line options: `python3 workflow.py <implementation>
---software DuMux --container-image <image>`.
+## The run config
 
-The implementation can be the exact benchmark folder, a repository checkout containing one, or a GitHub/GitLab/any git URL (e.g. `https://github.com/org/repo`, or `git@host:org/repo.git`) — in which case it's cloned into a throwaway temp directory that's deleted once this run finishes, so nothing accumulates on disk by default. Pass `--keep-clone` to clone into a persistent local cache instead, reused (fetch + checkout in place) by a later run against the same URL, along with its inference cache — useful if you're iterating on the same remote benchmark repeatedly and don't want to re-query the LLM every time. `--ref <branch-or-tag-or-commit>` pins what's checked out, `--clone-dir` picks an explicit clone location (implies `--keep-clone`), and `--fresh-clone` discards and re-clones an existing persistent one. This walks you through reviewing the AI-inferred parameter/metric metadata, then writes the semantic description, its dataset-provenance sidecar, and a plain `Snakefile` (no zip) to `outputs/<software-name>/`, renders a Markdown review table, and validates the result — exiting non-zero if verification fails. Both jsonld filenames default to a slug of the benchmark's own name, e.g. "rotating cylinders" -> `rotating_cylinders_benchmark.jsonld` + `rotating_cylinders_dataset.jsonld` (neither suffix is doubled up if the name already contains that word) — pass `--benchmark-filename`/`--dataset-filename` to force specific names instead, e.g. if `run_benchmark.py --benchmark-file` is hardcoded to `benchmark.jsonld`.
-
-The review step covers parameters and metrics together, in one pass. On a real terminal it's a curses screen: a summary ("N accepted automatically, M require your review") with explicit choices -- `[F]` review just the flagged items (or just press Enter), `[A]` also review the N auto-accepted ones (the reviewer chooses this, it's not automatic; shown even on a run where nothing happened to get flagged, so there's always a chance to double-check), `[N]` accept everything with no review, `[Q]` quit to the plain-text fallback. Whichever set you review, each item gets an Accept/Rename/Change unit/Change type/Change quantity kind/Edit explanation menu — arrow keys (or `j`/`k`), or the action's own number (`1`-`7`, shown next to it), move the highlight to that action right away so you can see where you've landed, and Enter confirms whatever's currently highlighted (a stray keypress just moves the highlight, it never fires an action on its own). When you pick "Edit explanation" (or any other text field), the input line starts pre-filled with the field's current value instead of a blank prompt -- it's true in-place editing, not a full retype: Left/Right (or Ctrl-A/Ctrl-E, or Home/End) move the cursor without touching the text, Backspace/Delete remove one character at a time, and typing inserts right at the cursor position, so a small fix (a typo, one word) only takes a few keystrokes. Enter saves the edited text, Esc cancels and leaves the field exactly as it was. A value longer than the terminal is wide scrolls horizontally to keep the cursor in view rather than wrapping mid-edit. The prompt text above the input line still word-wraps across as many lines as the terminal's actual width needs, with the editable line always placed on its own row below it, so nothing is clipped and the cursor is never pinned against the edge of a narrow window. The Outputs step's preset descriptions (below) wrap the same way. Where curses isn't usable (piped output, no TTY, `q` to back out), it falls back to a plain-text table per kind: type a row number to edit a field, or press Enter to accept the table as shown — rows below `--review-confidence-threshold` (default `0.7`) or flagged for a structural reason (e.g. a repaired mapping) show a `!`/`?` marker either way; this fallback doesn't have a separate "review the accepted ones" prompt since every row in its table is already visible and editable at once.
-
-Normal output stays short — a handful of `✓ ...`/`○ ...` checklist lines through discovery and inference, then a boxed "Benchmark generated successfully" summary at the end. Pass `-v`/`--verbose` to see what's collapsed into those checklist lines (resolved paths, per-LLM-call request headers, RO-Crate's full failing-checks list), or `--debug` for the exact request/response text of every LLM call as well. The run itself is announced step by step (`1/6 Discover benchmark`, `2/6 Select parameters`, ...) regardless of verbosity, and — the first time, on a real terminal — opens with a short "Press Enter to continue…" explanation of what the tool produces.
-
-Right after parameter selection (`3/6`, before any LLM call), an Outputs step asks (or, after the first run against a module, silently reuses) which artifacts to actually produce -- on a real terminal, a live per-file preview updates as you move between presets, so what you're about to generate is visible before you confirm it; pass `--outputs standard|snakefile|snakefile-only|dataset|description-only|none|dataset,snakefile` to set it non-interactively (see `--help`) instead of being asked. Whichever way it's resolved -- interactively, reused from a previous run, or via `--outputs` -- a one-line summary prints right after, e.g. `-> Standard -- Semantic description, dataset provenance, and Snakefile.`, naming the matching preset (or, for a combination that doesn't match any named preset, a plain list of what's included) -- so a non-interactive/`--skip-review` run isn't left showing a silent gap between the `3/6 Select outputs` and `4/6 Infer & review` banners. Every preset but one (`snakefile-only`) generates the benchmark description and `review.md`; `snakefile-only` skips semantic inference entirely -- no LLM call, no `benchmark.jsonld`, no dataset sidecar, no `review.md` -- see the Outputs-step bullet above and [Config files](#config-files) for the unit-suffix limitation that mode carries.
-
-The benchmark node links to a research problem (`investigates`, a `mathmod:ResearchProblem`) and a mathematical model (`uses` = `wd:P2283`, a `mathmod:MathematicalModel`). These are looked up on the [MaRDI portal](https://portal.mardi4nfdi.de) automatically: the tool searches for items that are research problems (`P31 = Q6534292`) matching the benchmark name or a parenthetical in the doc-comment such as "(Taylor-Couette flow)" (MaRDI aliases like "rotating cylinders problem" match too), then follows the problem's `P1513` link to its mathematical model. Labels are taken from MaRDI, e.g. "Taylor–Couette flow" / "Taylor–Couette model".
-
-- A single match is used directly and reported in the output. If there are several, an interactive run asks you to pick one (or `n` to keep local ids); with `--skip-review` the placeholders are kept instead.
-- The answer is cached in `<module>/.semantic_links_cache.json`, so you're asked once per benchmark (`--clear-cache` asks again).
-- If the portal can't be reached or nothing matches, local placeholder ids are used and the run says so. `--no-mardi-lookup` turns the lookup off.
-- Explicit flags always win: `--research-problem-label` / `--research-problem-id` and `--math-model-label` / `--math-model-id` (also usable in a `--config` file), e.g.
-
-```bash
-    --research-problem-id https://portal.mardi4nfdi.de/entity/Q6830614 \
-    --math-model-id https://portal.mardi4nfdi.de/entity/Q6830616
-```
-
-For non-interactive/CI runs, add `--skip-review` (and make sure `--scenario-params` is always passed, since omitting it also triggers an interactive prompt) — this also skips the intro banner and the Outputs prompt/preview, silently reusing the module's last saved output selection (or generating everything, the first time). Skip individual pipeline steps with `--skip-show` / `--skip-check`. Run any script with `--help` for its full option list.
-
-### Config files
-
-The run config (`--config`, for `workflow.py` and `describe_benchmark.py`)
-has a few plain keys, the same for every simulation software -- anything
-that depends on the software is in its [software description](#the-software-description).
-The DuMux and OpenFOAM implementations of the same benchmark have run
-configs of the same shape:
-
-```yaml
-implementation: /Users/sarbani/NFDI_Benchmark/dumux_test/rotating-cylinders
-software: DuMux
-container: git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1
-reference: /Users/sarbani/NFDI_Benchmark/rotating-cylinders/benchmark/1.0.0/minimal-configurations.json
-
-llm_model: openai/gpt-oss-120b
-review_below_confidence: 0.99
-verbose: true
-```
+The same keys work for every simulation software
+([`run-config-template.yaml`](run-config-template.yaml) explains each one):
 
 | Key | Meaning |
 |---|---|
-| `implementation` | your benchmark code: a folder or file, a git URL, or a link to a folder or file in a repository (required) |
-| `software` | the simulation software's name, e.g. `DuMux` (default: the LLM works it out) |
+| `implementation` | your code: a folder or file, a git URL, or a link to a folder or file in a repository (required) |
+| `software` | the simulation software, e.g. `DuMux` (default: the LLM works it out) |
 | `container` | the container image the simulation runs in (required) |
-| `reference` | an existing description of the same benchmark; `none` to use none (default: looked for) |
-| `llm_provider`, `llm_model` | which LLM to ask -- `groq`, `claude`, `openai`, `claude-code` (your Claude plan) or `codex` (your ChatGPT plan) -- the last two need no API key; default: the first whose key variable is set -- and optionally which of its models |
-| `review_below_confidence` | you review every LLM answer less sure than this (default 0.7) |
+| `reference` | an existing description of the same benchmark to map onto; `none` for none (default: looked for) |
+| `llm_provider`, `llm_model` | which LLM -- see below |
+| `review_below_confidence` | you review every answer less sure than this (default 0.7) |
 | `verbose` | show more detail while running |
 | `software_description` | your own description of the software (see below) |
 
-`run-config-template.yaml` explains each key. A value given on the command
-line wins over the file. Every command-line option also works as a key, by
-its name -- that is how older files are written (`module_dir:`,
-`container-image:`, ...), and they still work. See `config.py` for
-two argparse-inherent caveats (a `true` boolean can't be forced back to
-`false` from the command line for one run; an `append`-style option like
-`--exclude-flag` given in both places gets both).
+Every command-line option also works as a key, by its name
+(`python3 describe_benchmark.py --help` lists them), e.g. `scenario-params`
+(the inputs that differ between configurations) and `skip-review` (for runs
+without a terminal). A value on the command line wins over the file.
 
-**The generated `parameters.json` key convention, and Workflow-only mode's real limitation.** `snakefile.renderer.config_key()` writes each case's `parameters.json` key as the bare `Section.Key` (e.g. `Grid.Radial0`) UNLESS that parameter's unit is both known and one of `DEFAULT_UNIT_SYMBOLS` (currently `unit:M` → `m`, `unit:PA` → `Pa`), in which case it appends a bracketed suffix (`Grid.Radial0[m]`) to mirror `run_benchmark.py`'s own `parameter_json_key()` convention at runtime -- pass `--unit-symbol QUDT_UNIT=symbol` (repeatable) to `snakefile.generator`/`describe_benchmark.py` to extend or override that mapping if `run_benchmark.py`'s own `UNIT_SYMBOLS` differs. This is exactly where the **Workflow only** Outputs preset's one real limitation comes from: since that mode skips semantic inference entirely, no parameter's unit is ever known (every parameter reads back as `unit:UNITLESS`), so `config_key()` always falls back to the bare key -- correctly and honestly (a bare key is the right answer for "we genuinely don't know"), but if the real `run_benchmark.py` your container runs actually expects a unit-suffixed key for one of your selected parameters (i.e. its real-world unit is meters or pascals), that key won't match at runtime and the benchmark could silently read the wrong config value for that parameter. `--unit-symbol` can't work around this by itself in Workflow-only mode, since it only extends the unit→symbol mapping and there's no per-parameter unit recorded to map from -- check every selected parameter against your benchmark's actual `run_benchmark.py` before relying on Workflow-only mode for one with meter/pascal-valued parameters, or use a preset that keeps semantic inference on instead.
+## The LLM
 
-## Supported software and parameter names
+| `llm_provider` | Key | Default model |
+|---|---|---|
+| `groq` | `GROQ_API_KEY` ([free tier](https://console.groq.com/keys)) | `openai/gpt-oss-120b` |
+| `claude` | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| `claude-code` | none: your Claude plan, through [Claude Code](https://code.claude.com/docs/en/setup) | `sonnet` |
+| `codex` | none: your ChatGPT plan, through [Codex](https://developers.openai.com/codex/quickstart) | Codex's default |
 
-benchmantic comes with descriptions of three simulation codes
-(`software_descriptions/`), used whenever the run config names them; others
-are described by the LLM (see [The software description](#the-software-description)):
+The key comes from `LLM_API_KEY` or the variable above, `--llm-api-key`, or
+is asked for -- never from the run config, which gets shared. Without
+`llm_provider`, the first LLM whose key is set is used.
+
+- **Review.** Answers below `review_below_confidence`, or with a problem
+  benchmantic spotted, are shown for review (a full-screen view on a terminal,
+  plain text otherwise); `skip-review: true` accepts them as they are.
+- **Stored answers.** The reviewed answers are saved next to the
+  implementation (`.parameter_metadata_cache.json`,
+  `.metric_metadata_cache.json`) and reused; `--clear-cache` asks again. To fix
+  an answer later, edit the file and run again.
+- **Corrections** you make are remembered and shown to the LLM for similar
+  inputs of other benchmarks.
+- **Limits.** Requests are batched under a tokens-per-minute budget
+  (`--inference-batch-size`, `--inference-tpm-budget`); when a model's daily
+  quota runs out, another model of the same key is tried
+  (`--no-model-fallback` stops instead).
+
+## Supported software
+
+benchmantic holds no code for any particular software. A short *software
+description* (`software_descriptions/<name>.yaml`) says which files make up an
+implementation, where its configurations, inputs and results are, and how one
+configuration is run; [`software/template.yaml`](software/template.yaml)
+documents every key. Three come with benchmantic:
 
 | Software | Recognised by | Inputs | Metrics |
 |---|---|---|---|
-| DuMux | `main.cc` + `problem.hh` | `params.input` entries, with `getParam<T>()` call sites as context | JSON keys written in `main.cc` |
-| OpenFOAM | a case with `system/controlDict`, or a zip containing one (e.g. `output_template.zip`, unpacked to `<module>/.benchmantic/`) | dictionary entries (`constant/MRFProperties` / `MRF1/omega`), with how each is used in the file as context; template placeholders `{name}` are pre-selected | keys of the dict a Python script `json.dump`s to `solution_metrics.json` |
-| FEniCSx | the script or notebook the implementation link points at | numbers written in the code (`r = 0.05`, `dt = 1 / 1600`, `Constant(mesh, PETSc.ScalarType(0.001))`) | values of the code's variables when it ends (`max(C_D)`, `p_diff[-1]`) |
+| DuMux | `main.cc` + `problem.hh` | `params.input` entries, with their `getParam<T>()` call sites | JSON keys written in `main.cc` |
+| OpenFOAM | a case with `system/controlDict`, or a zip with one | dictionary entries; template placeholders `{name}` | keys of the dict a Python script writes to `solution_metrics.json` |
+| FEniCSx | the script or notebook the link points at | numbers in the code (`r = 0.05`) | values of the code's variables when it ends (`max(C_D)`) |
 
-**Any repository, as it is.** The implementation can be a link to a file or
-folder as the browser shows it, e.g.
-`https://github.com/jorgensd/dolfinx-tutorial/blob/main/chapter2/ns_code2.ipynb`
-(GitHub and GitLab `/blob/<branch>/<path>` and `/tree/<branch>/<path>`), or a
-local path to a file: the repository is cloned at that branch and
-benchmantic starts from that file or folder. A Python script or notebook
-needs neither an input file nor a metrics file (input format `python`,
-`run.type: script`, `metrics.from: variables` in the software description):
+For any other software the LLM writes the description from your repository,
+tries it, and corrects it until benchmantic can read the implementation with
+it; it is saved as `.benchmantic_software.yaml` next to the implementation
+(and, if you agree, in `software_descriptions/`). Write the part you know
+yourself with `software_description: my-code.yaml` -- the LLM fills in the rest.
 
-- *Inputs*: the top-level constants of the code -- plain numbers, number
-  arithmetic, tuples of numbers, or the one number inside a call. Values
-  computed from other names (`res_min = r / 3`) follow from the inputs and
-  are not offered. A notebook is read as its code cells.
-- *Metrics*: Python expressions over the code's variables when it ends,
-  listed as `metrics.values` (the LLM picks them when it writes the
-  description), else found in the code: values it prints
-  (`print(f"Drag: {C_D}")` -> `drag`) and arrays it fills in a loop (their
-  largest and last value; arrays of times are left out).
-- *One parameter file per case*: when each configuration is a file such as
-  `parameters_05.json` (input format `json`: every entry is an input, an
-  object `{"value": 0.33, "unit": "m"}` one input with its unit), the
-  description says `cases.files: "parameters_*.json"` (and `cases.folder`
-  when they sit elsewhere, e.g. `..`); with `run.type: parameter_file` the
-  Snakefile writes the case's parameter file -- the template's, with the
-  mapped values set and its layout kept -- and runs `run.command` with
-  `{parameter_file}` and `{metrics_file}` in it. Metrics a script
-  `json.dump`s as a dict named like `metrics` count even when the file name
-  comes from the command line.
-- *Workflow*: the Snakefile copies the implementation folder (next to the
-  Snakefile, else the folder it was described from, else a clone of the
-  linked repository at that branch, made on the first run), writes the
-  case's values into the constants of a copy of the code (only the number
-  changes, so `Constant(mesh, PETSc.ScalarType(...))` stays), appends a few
-  lines that write the metrics to `solution_metrics.json`, and runs the copy
-  in the container. The helpers doing this are copied into the Snakefile, so
-  running it needs nothing of benchmantic.
+Configurations can also be one parameter file each (e.g. `parameters_05.json`:
+`cases.files` in the description).
 
+## Parameter names across software
 
-**Parameter names and the reference benchmark.** The description names parameters software-neutrally; the link to the software's own inputs lives in `<name>_mapping.json`, and the generated Snakefile is built from it. Every run first looks for a *reference benchmark* -- an existing description of the same benchmark -- and reports the result in step 1:
+Parameters get software-neutral names (`angular_velocity_inner_cylinder`), and
+`<name>_mapping.json` links them to the software's own inputs. When a
+*reference* description of the same benchmark exists -- `reference:` in the run
+config, a description in the repository (e.g.
+`benchmark/1.0.0/minimal-configurations.json`), or benchmantic's own output for
+another software -- the LLM maps the software's inputs onto the reference's
+parameters, as one expression per input, which you review:
 
-1. `--reference-benchmark FILE` (or `reference-benchmark:` in the config), if given;
-2. otherwise a benchmark description in the repository (a JSON-LD file with an `m4i:Benchmark` and parameter sets, e.g. the catalog's `benchmark/1.0.0/minimal-configurations.json`; with several, one with the same benchmark name, else the highest version folder);
-3. otherwise benchmantic's earlier output for **another** software with the same benchmark name (`outputs/<software>/*_benchmark.jsonld`) -- so describing DuMux first and OpenFOAM second maps OpenFOAM onto DuMux's parameters.
+| Input | Expression |
+|---|---|
+| DuMux `Grid.Cells0` | `{cells_radial // 2} {cells_radial // 2}` |
+| DuMux `Grid.Radial0` | `{inner_radius} {(inner_radius + outer_radius) / 2} {outer_radius}` |
+| OpenFOAM `geom/ntheta` | `{cells_angular // 4}` |
 
-`--no-reference` (`no-reference: true`) skips the search.
+The expressions are checked against every configuration, and a unit mismatch
+(degrees vs radians) is flagged. So describing DuMux first and OpenFOAM second
+gives both the same parameters. `--parameter-names software` keeps the
+software's own names instead.
 
-- **No reference:** parameters are named from scratch -- the reviewed semantic name of each input (e.g. `angular_velocity_inner_cylinder`), mapped 1:1 to the input. `--parameter-names software` keeps the software's own names instead (the previous behaviour; no mapping file).
-- **Reference found:** the usual inference and review of the software's inputs runs first (semantic names, units). The LLM then maps those reviewed parameters onto the reference's parameters, as an expression per input -- a Python f-string body, e.g.
+The research problem and mathematical model a benchmark is linked to are
+looked up on the [MaRDI portal](https://portal.mardi4nfdi.de)
+(`--no-mardi-lookup` to skip; `--research-problem-id`, `--math-model-id` to set
+them).
 
-  | Input | Expression |
-  |---|---|
-  | DuMux `Grid.Cells0` | `{cells_radial // 2} {cells_radial // 2}` |
-  | DuMux `Grid.Radial0` | `{inner_radius} {(inner_radius + outer_radius) / 2} {outer_radius}` |
-  | OpenFOAM `geom/ntheta` | `{cells_angular // 4}` |
-  | OpenFOAM `geom/r0` (onto a DuMux-generated reference) | `{tokens(radial_coordinates)[0]}` |
-  | OpenFOAM `transportModel` | *(not mapped -- keeps its own value)* |
+## What it writes
 
-  Expressions may use parameter names, numbers, arithmetic, a few functions, and `tokens(name)[i]` to pick one value of a multi-value parameter. They are evaluated for every reference configuration and compared with the template's own values where it has them; an input whose reviewed unit differs from its parameter's (e.g. degrees vs radians) is flagged. Then the mapping review (same screen style as the semantic review) lets you accept or edit each expression. Reference parameters no input uses are reported -- e.g. the OpenFOAM rotating-cylinders case keeps the outer cylinder fixed, so `angular_velocity_outer_cylinder` is flagged as ignored. The description takes the reference's parameters, units and configurations, so it lines up with the reference; metrics the reference defines keep its units. The mapping is cached in `<module>/.parameter_mapping_cache.json`.
+`--outputs` (or the choice benchmantic offers on the first run) picks the files:
 
-**OpenFOAM template cases** (placeholders like `{omega}`, as in the catalog's `output_template.zip`) have no values of their own: they need a reference (in the catalog repository one is found automatically), or point `module_dir` at a case with concrete values.
+| Preset | Description + review | Dataset | Snakefile |
+|---|:-:|:-:|:-:|
+| `standard` (default) | ✓ | ✓ | ✓ |
+| `snakefile` | ✓ | | ✓ |
+| `dataset` | ✓ | ✓ | |
+| `description-only` | ✓ | | |
+| `snakefile-only` | | | ✓ (no LLM; parameters keep their software names and no units) |
 
-The generated Snakefile reads the neutral names from `parameters.json` (as written by the catalog's `run_benchmark.py`, including unit suffixes such as `inner_radius[m]` and `angular_velocity_inner_cylinder[rad/s]`) and sets each input from its expression: DuMux gets `-Section.Key "<value>"` flags; OpenFOAM gets its placeholders filled in (`X.template` -> `X`) or entries set with `foamDictionary`, then runs `Allrun` (or `blockMesh` + the solver) and the metrics script. With a reference, mesh rules such as splitting the radial cells across two zones are part of these expressions (e.g. `Grid.Cells0` = `{cells_radial // 2} {cells_radial // 2}`); without one, every input is passed 1:1.
+`workflow.py` then renders the description as Markdown (`show_description.py`
+-> `review.md`) and checks it (`verify_description.py`: the SHACL shapes of
+[semantic-benchmark](https://pypi.org/project/semantic-benchmark/), then
+loading it with its `BenchmarkLoader`); its exit code is the check's, so it can
+gate CI. The Snakefile reads each configuration's `parameters.json` (as the
+catalog's `run_benchmark.py` writes it) and runs the simulation in the
+container; set `BENCHMARK_CONTAINER` to a local `.sif` to use that instead of
+the published image.
 
-## Architecture / Pipeline walkthrough
+`run_configs.py` runs `workflow.py` for every run config in a folder.
 
-`describe_benchmark.py` is the single entry point, and runs five stages in process (calling `metadata.builder` and `snakefile.generator` directly, not via subprocess) — on screen, these map onto six numbered step banners (`1/6 Discover benchmark`, `2/6 Select parameters`, `3/6 Select outputs`, `4/6 Infer & review`, `5/6 Generate`, `6/6 Validate`), since stage 1 below covers both discovery and parameter selection. The Outputs step (`3/6`) deliberately comes BEFORE inference (`4/6`), not after it: it's the one decision that can skip semantic inference entirely (the **Workflow only** preset), so it has to be made before any LLM call, not right before generation the way it used to be.
+## A benchmark repository
 
-1. **Discover** (`metadata.repo_source`, `metadata.repository`, `metadata.parameters`, `metadata.metrics`) — first resolves `module_dir`: a local path is used as-is; a git URL is cloned into a throwaway temp directory, deleted automatically once the run finishes (or, with `--keep-clone`, into a persistent cache directory instead — default `.benchmantic_repo_cache/`, override with `BENCHMANTIC_REPO_CACHE` or `--clone-dir`). Then scans the resolved module for parameter and metric candidates, and scrapes license, dependency, build, citation, and author information from source and README. Parameters can be selected via `--scenario-params`, or interactively if omitted -- on a real terminal, a curses checklist (`↑`/`↓`/`j`/`k` to move, `Space` to toggle the highlighted row, or type a row's own number to jump the highlight straight to it -- works for any row, not just the first few visible on screen, and the list scrolls automatically to fit however tall the terminal is; each digit you type appears on its own dedicated "Go to #: " line with a real, visible cursor, and the highlight moves live as you type, well before you press anything to confirm; a one-line `↑/↓: move, space: toggle, type a number: to jump` legend sits right under the title, visible immediately instead of scrolled past a long list to find, while state that changes as you go -- the running selected count, that "Go to #:" line, and the less-frequent `a`/`n`/`q` shortcuts -- prints right after the list instead, closer to where you're already looking once you've scanned through it; every line is independently word-wrapped to the terminal's actual width, so an option's own text (e.g. "continue") is never the part that gets cut off on a narrower window; press Enter to toggle the highlighted row, `a`/`n` to select all/none, Enter with nothing typed to finish, `q`/Escape to cancel to the plain-text prompt below); the plain-text fallback takes comma-separated index numbers, `all`, `none`, or `table` to reprint the list, with its column count adapted to the terminal's actual width so long parameter names don't wrap mid-row.
-2. **Select outputs** (`metadata.builder._resolve_outputs_selection()`, `ai.tui.output_picker()`) — decides which artifacts this run actually produces, BEFORE any LLM call (see the walkthrough intro above for why this moved here). `--outputs`, if given, wins outright; otherwise an interactive picker (curses, or a plain-text preset menu) offers presets (Standard / Workflow + Description / **Workflow only** / Description + Dataset / Description only / Custom) or a per-artifact custom choice (dataset sidecar and/or Snakefile -- the benchmark description and review report aren't Custom-toggleable, since **Workflow only** is the only way to turn those off), previews exactly what's about to be written, and asks `? Generate these files? [Y/n]` before anything is generated (answering `n` reopens the picker); otherwise (CI / `--skip-review` / no real terminal) the module's last saved choice is silently reused. Either way the resolved selection is persisted to `.benchmantic_outputs.json` beside the module (same convention as the parameter/metric inference caches) so a later run doesn't ask again.
-3. **Infer & review** (`ai.cache`, `ai.inference`, `ai.review`, `ai.tui`) — skipped ENTIRELY when step 2 resolved to **Workflow only**: no LLM client is constructed at all (no `GROQ_API_KEY`/`OPENAI_API_KEY` needed), and each selected parameter instead gets a minimal record built straight from its raw `params.input` value (semantic name = the raw `Section.Key`, datatype guessed cheaply via `utils.to_number`, unit left unknown). Otherwise, for every candidate not already cached, an LLM infers its physical meaning, broken down further inside the `ai/` package:
-   - `ai.prompts` builds the prompt from the benchmark's description, the candidate parameters/metrics, and any relevant prior human corrections (see `ai.corrections` below) — deliberately *not* the full `main.cc`/`problem.hh` source. Each parameter already carries its own `getParam<>()` call-site excerpt (`metadata.parameters.attach_cpp_hints`) and each metric its own surrounding-code snippet (`metadata.metrics.discover_metrics`), which is far smaller and just as code-grounded; the full file is only searched as a last-resort fallback for the rare item with no per-item context of its own.
-   - `ai.inference` queries the configured provider (Groq by default, or OpenAI), retrying up to 3 times on failure, and failing fast (no pointless retries/waits) on an unrecoverable size/rate-limit response instead of exhausting all 3 attempts on something retrying can't fix. This includes a provider's *daily* token quota (Groq's "tokens per day (TPD)" limit, distinct from its per-minute TPM budget) being exhausted: unlike a per-minute limit, which resets in well under a minute and is worth a short sleep-and-retry, a daily quota's reset is routinely tens of minutes to multiple hours away, so a short in-loop retry can't fix it either way. Groq tracks TPD *per model*, not account-wide (confirmed by Groq's own per-model rate-limit table, and consistent with this same account being able to see very different TPM caps on different models -- see `PROVIDER_CONFIG`'s comment in `ai/inference.py`), so hitting it doesn't mean the account is out of quota, only that model is. By default, when this happens, `ai.inference` automatically asks the provider (`GET /v1/models`, i.e. `client.models.list()`) what other models this API key can access, switches to one it hasn't already exhausted, and keeps going -- printing which model it switched to and why -- instead of stopping the run; that switch is remembered for the rest of the run (parameter *and* metric inference both), so later batches go straight to the working model. Only once every reachable model has been tried does it fail, with a message naming every model it actually attempted and the exact wait the last one reported. Pass `--no-model-fallback` to go back to failing immediately on the first exhausted model instead (e.g. if you specifically need output from one named `--model`). Before any of that: more than `--inference-batch-size` (default 8) not-yet-cached items are split into multiple independent requests, each chunk is split *again* if its own estimated token cost (prompt + expected completion) exceeds `--inference-tpm-budget` (default 9,000) regardless of item count, and every request -- across the whole run, not just within one batch -- reserves its estimated cost against one shared tokens-per-minute ledger before sending, sleeping if needed so the run's real request rate stays under that budget too.
-   - `ai.validation` checks the response for missing fields, out-of-range indices, and unit/quantityKind mix-ups, correcting or flagging them. If a response has a unit but no quantityKind, it's backfilled from the unit alone via two best-effort live lookups, in order: first the unit's own [QUDT vocabulary entry](http://qudt.org/vocab/unit/) (e.g. `unit:PA` -> `http://qudt.org/vocab/unit/PA`), asking QUDT directly what quantity kind that unit belongs to; then, only if that doesn't resolve it, the [SI Digital Framework](https://si-digital-framework.org/SI/units?lang=en) units page. Either way the result is flagged for review, since it's this pipeline's own inference rather than the model's.
-   - `ai.cache` persists the final (post-review) result beside the module, so each item is inferred only once.
-   - Review: parameters and metrics reviewed together in one combined pass (`ai.review.review_or_skip_combined()`), not two separate sessions. On a real terminal this is `ai.tui`'s curses queue: a summary of how many items were auto-accepted vs. flagged (low confidence, or a structural issue like a positionally-reconstructed `ini`/`key` field -- see `ai.validation`), then just the flagged items, one per screen, with an Accept/Rename/Change unit/Change type/Change quantity kind/Edit explanation action menu. Wherever curses isn't usable (no real TTY, not importable, or the reviewer backs out with `q`) it falls back to `ai.review`'s plain-text table per kind -- one prompt, type a row number to edit any field or press Enter to accept the table as shown, `!`/`?` markers on rows worth a look but Enter always accepts regardless. Skipped entirely with `--skip-review` (or, as above, whenever step 2 resolved to **Workflow only**). Every value actually changed here (either UI) is recorded by `ai.corrections`, which persists it (matched by exact or fuzzy key similarity) so a similarly named/typed parameter in a *different* benchmark benefits from it too, next time it's inferred.
-4. **Build** (`metadata.builder`) — wraps each reviewed value, along with the scraped manifest info, into typed nodes inside one metadata4ing `@graph` (`GraphBuilder`). Author, publisher, and software dependencies are assembled into a *separate* graph here too (`GraphBuilder.build_dataset_graph()`) rather than merged into the same one -- see the next step. In **Workflow only** mode, this step builds only a minimal, in-memory graph (case-varying parameter values, plus just enough of a `local:software`/`./` node pair for `snakefile.generator` to read) -- it's never written out as a real `<name>_benchmark.jsonld` deliverable, only used as input to the Snakefile step below.
-5. **Validate & Generate** (`metadata.builder`, `snakefile.generator`, `snakefile.renderer`) — checks the benchmark graph against the RO-Crate 1.1 profile, then writes `<benchmark-name>_benchmark.jsonld` (parameters, metrics, processing steps, RO-Crate root) plus whichever of a sidecar `<benchmark-name>_dataset.jsonld` (author, publisher, software dependencies, linked back to the benchmark file via `schema:isPartOf`) and a plain `Snakefile` (not zipped) the Outputs step selected -- **except** in **Workflow only** mode, which skips RO-Crate validation entirely (there's no `benchmark.jsonld` to validate) and writes only `outputs/<software-name>/Snakefile`, nothing else.
-
-Two additional scripts sit downstream of generation:
-
-- **`show_description.py`** loads the benchmark file, auto-discovers its sibling `_dataset.jsonld` file next to it (or takes `--dataset-jsonld` explicitly), and renders both together as Markdown tables (manifest info, dependencies, parameters, metrics) for human review, flagging any unit/quantityKind mix-ups. Unlike the interactive review step, this reflects the fully built graph — including manifest fields (license, authors, dependencies) and resolved case values that review never touches — and is saved to disk (`review.md`) as a durable record. Run directly, it always prints the rendered table to the terminal too; called in-process the way `describe_benchmark.py` and `workflow.py` both do (for every Outputs preset except **Workflow only**, the same way the benchmark description itself is written for every preset but that one), it's passed `--quiet` so the table is saved to `review.md` but not also echoed to the terminal, since both callers already list `review.md` among the run's generated files right afterward -- printing the whole table inline (potentially twice, once per caller) was mostly noise to scroll past. If you want to see it on screen, run `show_description.py <benchmark-file>.jsonld` directly (or drop `--quiet` from a `--config` invocation calling it yourself). If the dataset sidecar wasn't generated that run, `review.md` still gets written, just without the manifest/dependency sections that come from it -- covering only the benchmark's own input parameters and output metrics. In **Workflow only** mode neither `review.md` nor `verify_description.py` runs at all (`workflow.py` skips that whole downstream chain with a printed explanation, since there's no `benchmark.jsonld` to feed it).
-- **`verify_description.py`** validates the benchmark file (not the dataset sidecar -- it has no bearing on the check) in two stages. First, SHACL: it runs `pyshacl` against the shapes bundled with `semantic_benchmark` and prints every violation, grouped by constraint with the offending nodes listed; any violation fails the run. (The loader runs these shapes too, but only writes a `.shacl.log` next to the file and never fails, so this script reports them itself.) Second, it loads the file with the real `semantic_benchmark.BenchmarkLoader` and checks what the shapes don't cover: at least one processing step, a value on every parameter, and a resolvable field mapping for every metric. Options: `--shacl-only` skips the second stage, `--shapes FILE.ttl` validates against a different shapes file, `--report FILE` saves pyshacl's full report, and `--export-shapes FILE.ttl` writes the shapes out as Turtle (e.g. to include in an LLM prompt).
-
-To fix a value after the fact (e.g. a run done with `--skip-review`, or something spotted later in `review.md`): edit the relevant entry in `.parameter_metadata_cache.json` (or `.metric_metadata_cache.json`) inside the module directory, then re-run `describe_benchmark.py` **without** `--clear-cache` so the fix is reused rather than re-inferred, and re-run `verify_description.py` to confirm.
-
-## Repository structure
-
-```
-benchmantic/
-├── describe_benchmark.py    # entry point: orchestrates metadata + Snakefile generation
-├── show_description.py       # renders the benchmark + dataset jsonld files as Markdown for review
-├── verify_description.py     # validates the benchmark jsonld file against semantic_benchmark
-├── workflow.py                # runs the three scripts above as one CI-friendly pipeline
-├── config.py                   # optional --config YAML support (workflow.py + describe_benchmark.py)
-├── utils.py                   # shared string/number/file helpers
-├── metadata/                  # benchmark.jsonld generation
-│   ├── builder.py             #   orchestrates manifest + RO-Crate @graph construction (benchmark + dataset docs)
-│   ├── mapping.py             #   benchmark parameters -> software inputs: expressions, checks, mapping file
-│   ├── reference.py           #   reads an existing benchmark description (--reference-benchmark)
-│   ├── graph.py               #   shared @id-resolution / node-lookup helpers
-│   ├── repo_source.py         #   resolves module_dir: local path, or clone/update a git URL
-│   ├── repository.py          #   repo scanning: README/AUTHORS/SPDX/CITATION.cff
-│   ├── parameters.py          #   ParameterCandidate + RO-Crate parameter fields
-│   ├── metrics.py             #   MetricCandidate, metric-key scanners + RO-Crate metric fields
-│   ├── mardi.py               #   MaRDI portal lookup (research problem / mathematical model)
-│   └── publication.py         #   literature citation extraction
-├── ai/                        # LLM-based semantic metadata inference
-│   ├── prompts.py              #   prompt templates (software name + its description's notes filled in per run)
-│   ├── mapping.py              #   LLM proposal of input -> benchmark-parameter expressions
-│   ├── inference.py            #   provider config + request/retry loop
-│   ├── validation.py           #   response validation and repair
-│   ├── review.py                #   combined review/edit step (plain-text) with confidence gating
-│   ├── tui.py                    #   optional curses UI for parameter selection + the review queue
-│   ├── cache.py                 #   on-disk inference caching + Outputs-step selection persistence (per module)
-│   └── corrections.py           #   cross-benchmark human-correction memory
-├── snakefile/                  # executable-workflow generation
-│   ├── generator.py             #   reads benchmark.jsonld, asks the software for its Snakefile, writes it
-│   ├── renderer.py              #   shared pieces: parameters.json keys, parameter assignments
-│   └── styles/                  #   how a case is run: command_line (DuMux), case_files (OpenFOAM)
-├── software/                   # reading a benchmark's software -- no software-specific code
-│   ├── __init__.py              #   resolve(): the software's name -> its description
-│   ├── autoconfig.py            #   the LLM writes a description; each proposal is tried on the repo
-│   ├── generic.py               #   the one engine that does every step from a description
-│   ├── template.yaml            #   every key a software description can have, documented
-│   ├── sources.py               #   shared ways to read sources (C++ class, Doxygen, README, CMake, ...)
-│   ├── formats/                 #   input file readers: ini, foam_dict
-│   └── base.py                  #   the interface the pipeline calls
-├── software_descriptions/      # descriptions of known software: dumux.yaml, openfoam.yaml
-├── run-config-template.yaml    # start here: a run config with every plain key explained
-└── tests/                      # each software checked against a small example in tests/fixtures/<software>/
-```
-
-## The software description
-
-Every simulation code organises a benchmark differently: DuMux has a
-`params.input` file per case and a compiled program, OpenFOAM a case folder
-with dictionaries and an `Allrun` script. benchmantic holds no code for any
-particular software. Instead, a short *software description* says where
-things are: which files make up the implementation, which file marks one
-case, how the inputs are written, where the results are written, and how one
-case is run in the container. `software/template.yaml` explains every key.
-
-You normally never write one. The run config names the software, and:
-
-1. if `software_descriptions/<name>.yaml` exists (DuMux and OpenFOAM do), it is used;
-2. otherwise the LLM writes the description from your repository (file
-   list, short excerpts, the contents of zip archives), with the known
-   descriptions as examples. Each proposal is tried on your repository --
-   benchmantic must find the implementation, its cases, inputs and results
-   -- and if it fails, the LLM is shown why and tries again (up to 3 times).
-
-A description the LLM wrote is saved next to your benchmark as
-`.benchmantic_software.yaml` and reused on later runs. You are asked whether
-to also save it to `software_descriptions/`, so that naming the software
-works without the LLM from then on (answer in advance with
-`save_software_description: true` or `false`).
-
-If the LLM gets something wrong, or you prefer to say it yourself, write
-the part you know in a small file and point to it:
+`create_benchmark_repo.py` turns the outputs into a repository laid out like
+[rotating-cylinders](https://github.com/Simulation-Benchmarks/rotating-cylinders):
+README, CITATION.cff, codemeta.json, REUSE licensing,
+`benchmark/<version>/minimal-configurations.json`, `<software>/Snakefile` and
+`run_benchmark.py`, the container's folder, and GitHub Actions that build the
+container, run every configuration and check its metrics. The files are
+[`repository_template/`](repository_template/) with the benchmark filled in.
+It reads the `repository:` block of the run config:
 
 ```yaml
-software_description: my-code.yaml   # may be partial: the LLM fills in the rest
+repository:
+  name: taylor-couette-flow            # the benchmark's title in the DuMux list
+  title: Taylor-Couette Flow Benchmark
+  summary: A benchmark for ...
+  documentation: documentation.md      # becomes docs/benchmark-documentation.md
+  container: container                 # the Dockerfile's folder (or a GitHub/GitLab link)
+  authors: ["Given Family; ORCID; affiliation"]
 ```
 
-`software_description: llm` asks the LLM for a new description even when
-benchmantic has one -- useful to see how well it does.
+```bash
+python3 create_benchmark_repo.py --config my-benchmark.yaml --org Sarbani-Roy --github --watch
+```
 
-Python is only needed for an input file format benchmantic can't read yet
-(a reader in `software/formats/`, reusable by every later software), or a
-new way of running a case (a style in `snakefile/styles/`).
+`--github` creates the repository with the GitHub CLI (`gh`) and pushes it --
+or adds a commit to it, if it exists; `--watch` waits for its Actions and fails
+unless they pass.
+
+## GitHub Actions
+
+| Workflow | When | What |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | every push and pull request | tests and REUSE lint; the example described and turned into a repository |
+| [`create-benchmark-repo.yml`](.github/workflows/create-benchmark-repo.yml) | Actions tab -> *Run workflow* | describes a benchmark (input: its run config), creates its repository in a GitHub account and waits for that repository's Actions |
+
+*Create benchmark repository* needs two repository secrets: `BENCHMARK_REPO_TOKEN`,
+a personal access token of the target account (classic: scopes `repo` and
+`workflow` -- the built-in token cannot create repositories), and
+`LLM_API_KEY` (provider: the repository variable `LLM_PROVIDER`, default
+`groq`). Its input *ask_llm* asks the LLM again for everything; otherwise only
+for what has no stored answer -- everything, for a new benchmark.
+
+Locally: `pip install -r requirements.txt pytest numpy httpx reuse`, then
+`python -m pytest` and `reuse lint`.
+
+## Layout
+
+```
+workflow.py              describe -> show -> verify, in one command
+describe_benchmark.py    describe: the description, dataset, mapping and Snakefile
+show_description.py      a description as Markdown tables (review.md)
+verify_description.py    checks a description against semantic-benchmark
+create_benchmark_repo.py a benchmark repository from the outputs
+run_configs.py           workflow.py for every run config in a folder
+config.py                run configs
+metadata/                reading the implementation, building the JSON-LD
+ai/                      the LLM: prompts, requests, checks, review, stored answers
+software/                reading any software from its description
+software_descriptions/   DuMux, OpenFOAM, FEniCSx
+snakefile/               writing the Snakefile
+repository_template/     the files of a benchmark repository
+examples/                Taylor-Couette flow with DuMux
+tests/
+```
 
 ## License
 
-MIT — see [`LICENSES/MIT.txt`](LICENSES/MIT.txt). Licensing follows the [REUSE](https://reuse.software) convention; run `reuse lint` to verify compliance.
+MIT -- see [`LICENSES/MIT.txt`](LICENSES/MIT.txt). The example's DuMux sources
+are GPL-3.0-or-later. Licensing follows [REUSE](https://reuse.software); run
+`reuse lint` to check.

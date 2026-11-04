@@ -84,6 +84,7 @@ def render_mapped(adapter, mapping: dict[str, Any], hints: dict[str, Any], args,
 # ends. Run it in a folder holding parameters.json, as run_benchmark.py
 # prepares it.
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -99,6 +100,8 @@ repository = {hints.get("repository")!r}
 repository_ref = {hints.get("repository_ref")!r}
 implementation_path = {hints.get("module_relative_path") or "."!r}
 container_image = {args.container_image!r}
+# BENCHMARK_CONTAINER (e.g. a .sif built in CI) overrides the published image
+container_uri = os.environ.get("BENCHMARK_CONTAINER") or f"docker://{{container_image}}"
 
 with open("parameters.json") as f:
     config = json.load(f)
@@ -132,7 +135,7 @@ rule run_simulation:
     resources:
         serial_run=1
     singularity:
-        f"docker://{{container_image}}"
+        container_uri
     run:
         # 1. a copy of the implementation, with this case's values in its code
         source = implementation_dir

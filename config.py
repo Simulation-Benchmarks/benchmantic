@@ -5,36 +5,18 @@
 """
 config.py
 
-The run config: a YAML file passed with --config to workflow.py or
-describe_benchmark.py, so a benchmark's settings don't have to be retyped.
-A value also given on the command line wins over the file.
+Run configs: a YAML file (--config) with the defaults of the command-line
+options of workflow.py and describe_benchmark.py; the command line wins.
 
-Format -- a few plain keys, the same for every software (anything that
-depends on the software is in its software description instead):
+    implementation: /path/to/benchmark      # your code: a folder or a git link
+    software: DuMux
+    container: registry.example.org/benchmark:1.0
 
-    implementation: /path/to/rotating-cylinders     # your code (folder or git URL)
-    software: DuMux                                 # the simulation software's name
-    container: registry.example.org/rotating-cylinders:3.1   # image it runs in
-    reference: /path/to/benchmark/1.0.0/minimal-configurations.json   # optional
-    llm_model: openai/gpt-oss-120b                  # optional
-    review_below_confidence: 0.99                   # optional
-    verbose: true                                   # optional
-
-See run-config-template.yaml for every key. Any command-line option also
-works as a key, by its name (leading "--" optional, dashes or underscores
-both accepted) -- that is how older files are written.
-
-Two caveats, both inherent to how argparse merges an explicit CLI value
-with a default rather than anything special to this file:
-  - A store_true flag (verbose, clear-cache, skip-review, ...)
-    set to `true` in the config can't be forced back to `false` from the
-    command line for one run -- there's no CLI syntax for "explicitly
-    off" on a store_true flag. Remove it from the config for that run
-    instead.
-  - An append-action flag (--exclude-flag, --unit-symbol) given as a YAML
-    list in the config, and *also* passed on the command line that run,
-    gets both: the config's list first, then the CLI values appended
-    after it -- not one replacing the other.
+run-config-template.yaml explains the plain keys; any option also works as a
+key, by its name. A `repository:` block is for create_benchmark_repo.py and
+ignored here. Two argparse limits: a flag set to true in the file can't be
+turned off on the command line, and a repeatable option given in both places
+gets both lists.
 """
 
 from __future__ import annotations
@@ -73,6 +55,8 @@ def translate(data: dict[str, Any], source: Path) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in data.items():
         key = str(key).lstrip("-").replace("-", "_")
+        if key == "repository":  # create_benchmark_repo.py's settings, not benchmantic's
+            continue
         if key in ("llm_api_key", "api_key") or key.endswith("_api_key"):
             sys.exit(f"Error: {source}: API keys don't go into run config files (they get shared). Set "
                      "LLM_API_KEY in the environment, pass --llm-api-key, or paste the key when asked.")

@@ -22,7 +22,7 @@ use -- same rationale as describe_benchmark.py's --scenario-params prompt:
 this needs a real terminal for input()).
 
 metadata.builder calls review_or_skip_combined() (not the older
-review_or_skip(), called once per kind) so parameters and metrics go
+a separate review per kind) so parameters and metrics go
 through ONE review pass instead of two back-to-back table sessions. On a
 real terminal that supports it, this shows ai.tui's curses queue -- only
 the flagged items, everything else auto-accepted -- with a plain-text
@@ -373,27 +373,3 @@ def review_or_skip_combined(
     return final_param_items, final_metric_items, param_corrections, metric_corrections
 
 
-def review_or_skip(
-    items: list[dict],
-    kind: str,
-    skip: bool,
-    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-) -> tuple[list[dict], list[dict]]:
-    """interactive_review(), unless `skip` is set (--skip-review) or there's
-    nothing to review -- in which case the items are returned unchanged and
-    no corrections are recorded.
-
-    Note: with --skip-review, any "_needs_verification" marker (see
-    ai.validation's positional-backfill repair) is left in place on the
-    returned items rather than silently dropped -- there's no review step
-    here to resolve it, so it stays visible in the cached
-    .parameter_metadata_cache.json / .metric_metadata_cache.json entry as a
-    signal that this row's parameter mapping was reconstructed, not
-    confirmed, and is worth a manual look later. It's stripped from the
-    metadata4ing graph either way (build_parameter_fields()/
-    build_metric_fields() only ever copy the specific fields the graph
-    needs).
-    """
-    if skip or not items:
-        return items, []
-    return interactive_review(items, kind, confidence_threshold)

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
+# What benchmantic needs to run. groq/anthropic are reached through the openai
+# client; roc-validator (the optional RO-Crate check) is installed separately.
+openai
+pyyaml
+rdflib
+semantic-benchmark~=0.4.2

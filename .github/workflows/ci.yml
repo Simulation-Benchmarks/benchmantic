@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
+# Tests and REUSE licensing, then the example run end to end: describe the
+# Taylor-Couette example and turn it into a benchmark repository (no LLM needed:
+# the example's reviewed answers are stored with it).
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -r requirements.txt pytest numpy httpx reuse
+      - run: python -m pytest
+      - run: reuse lint
+
+  example:
+    runs-on: ubuntu-latest
+    env:
+      CONFIG: examples/taylor-couette-flow/benchmantic.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt reuse
+      - name: Describe the example and verify the description
+        run: python workflow.py --config "$CONFIG"
+      - name: Create its benchmark repository
+        run: python create_benchmark_repo.py --config "$CONFIG"
+      - name: Check the repository's benchmark description
+        working-directory: outputs/repositories/taylor-couette-flow
+        run: python scripts/validate_benchmark.py benchmark/1.0.0/minimal-configurations.json

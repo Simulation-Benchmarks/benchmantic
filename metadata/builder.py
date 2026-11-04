@@ -1333,137 +1333,87 @@ def add_mapping_args(ap) -> None:
                          "('software', e.g. Grid.Radial0; the previous behaviour).")
 
 
+def add_build_arguments(ap: argparse.ArgumentParser, *, module_dir_optional: bool = False) -> None:
+    """Every option build() reads -- shared by this module's own command line
+    and describe_benchmark.py's, so each is defined (and documented) once."""
+    ap.add_argument("module_dir", type=str, **({"nargs": "?", "default": None} if module_dir_optional else {}),
+                    help="The benchmark implementation: a folder (or a repository containing it), a git URL, "
+                         "or a link to a folder or file as the browser shows it (.../tree/<branch>/<path>, "
+                         ".../blob/<branch>/<path>). A URL is cloned into a temporary folder."
+                         + (" May come from `implementation:` in --config instead." if module_dir_optional else ""))
+    clone = ap.add_argument_group("git URLs")
+    clone.add_argument("--ref", type=str, default=None,
+                       help="Branch, tag or commit to check out (default: the repository's default branch).")
+    clone.add_argument("--keep-clone", action="store_true",
+                       help="Keep the clone (in BENCHMANTIC_REPO_CACHE, default .benchmantic_repo_cache/) and reuse "
+                            "it, with its cached LLM answers, on later runs.")
+    clone.add_argument("--clone-dir", type=Path, default=None, help="Clone into this folder (implies --keep-clone).")
+    clone.add_argument("--fresh-clone", action="store_true", help="Discard a kept clone and clone again.")
+
+    sw = ap.add_argument_group("software")
+    sw.add_argument("--software", default="auto",
+                    help="The simulation software, e.g. DuMux: software_descriptions/<name>.yaml, or a description "
+                         "the LLM writes (default: the LLM works out the software too).")
+    sw.add_argument("--software-description", default=None, metavar="FILE",
+                    help="Your own software description (may be partial: the LLM fills in the rest), or 'llm' "
+                         "to have the LLM write a new one.")
+    sw.add_argument("--save-software-description", default=None, action=argparse.BooleanOptionalAction,
+                    help="Save a description the LLM wrote to software_descriptions/ (default: ask).")
+    add_mapping_args(ap)
+    add_semantic_override_args(ap)
+
+    params = ap.add_argument_group("parameters and the LLM")
+    params.add_argument("--scenario-params", type=str, default=None,
+                        help="Comma-separated input keys that differ between configurations (e.g. Cells0,Cells1); "
+                             "asked for on a terminal if omitted.")
+    params.add_argument("--full-value-params", type=str, default=None,
+                        help="Comma-separated input keys whose whole multi-value entry matters "
+                             "(e.g. 'Radial0 = 1.0 2.0'), not one value of it.")
+    params.add_argument("--provider", type=str, default=None,
+                        help="The LLM: " + ", ".join(PROVIDER_CONFIG) + " (default: the first whose key variable "
+                             "is set, else groq).")
+    params.add_argument("--llm-api-key", default=None, metavar="KEY",
+                        help="Its API key, for this run (else LLM_API_KEY or the provider's usual variable, else "
+                             "asked for). Never in run config files.")
+    params.add_argument("--model", type=str, default=None,
+                        help="The model (default: " + ", ".join(f"{p}: {c['default_model']}"
+                                                            for p, c in PROVIDER_CONFIG.items() if c["default_model"]) + ").")
+    params.add_argument("--clear-cache", action="store_true",
+                        help="Ask the LLM again for everything, instead of reusing the stored answers "
+                             "(.parameter_metadata_cache.json, .metric_metadata_cache.json next to the implementation).")
+    params.add_argument("--fallback-on-error", action="store_true",
+                        help="If the LLM fails, use placeholder metadata (unitless, confidence 0) instead of stopping.")
+    params.add_argument("--no-model-fallback", action="store_true",
+                        help="Stop when the model's daily quota runs out, instead of switching to another model "
+                             "the key can use.")
+    params.add_argument("--inference-batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Most items per LLM request (default: {DEFAULT_BATCH_SIZE}).")
+    params.add_argument("--inference-tpm-budget", type=int, default=DEFAULT_TPM_BUDGET,
+                        help=f"Tokens per minute to stay under, across the run (default: {DEFAULT_TPM_BUDGET:,}); "
+                             "set it below your account's limit.")
+
+    run = ap.add_argument_group("review and outputs")
+    run.add_argument("--skip-review", action="store_true",
+                     help="Accept the LLM's answers without the review step (for CI and other runs without a terminal).")
+    run.add_argument("--review-confidence-threshold", type=float, default=review.DEFAULT_CONFIDENCE_THRESHOLD,
+                     help=f"Flag answers less sure than this for review (default: {review.DEFAULT_CONFIDENCE_THRESHOLD}).")
+    run.add_argument("--outputs", type=str, default=None,
+                     help="Which files to write: standard (all, the default), snakefile (no dataset), "
+                          "snakefile-only (only a Snakefile, no LLM), dataset (no Snakefile), description-only, "
+                          "or a list of dataset,snakefile. Default: as on the last run, else asked.")
+    run.add_argument("--skip-validation", action="store_true",
+                     help="Skip the RO-Crate 1.1 check (needs roc-validator and network).")
+    run.add_argument("-v", "--verbose", action="store_true",
+                     help="Show the detail behind the short progress lines, and one line per LLM request.")
+    run.add_argument("--debug", action="store_true", help="--verbose, plus every LLM request and response in full.")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("module_dir", type=str,
-                     help="Path to the benchmark implementation (e.g. a DuMux module folder or an "
-                          "OpenFOAM case), OR a higher-level repo/checkout directory -- the software's "
-                          "adapter (software/<name>/) searches it recursively. Also accepts a "
-                          "GitHub/GitLab/any git-reachable URL (https://..., git://..., or an scp-like "
-                          "git@host:path spec) -- by default it's cloned into a throwaway temp directory "
-                          "that's deleted once this run finishes; see --keep-clone/--ref/--clone-dir/"
-                          "--fresh-clone.")
-    ap.add_argument("--ref", type=str, default=None,
-                     help="Branch, tag, or commit to check out when module_dir is a git URL. Ignored for "
-                          "a local module_dir. Default: the remote's default branch.")
-    ap.add_argument("--keep-clone", action="store_true",
-                     help="If module_dir is a git URL, clone it into a persistent local cache directory "
-                          "(repo_source.DEFAULT_CLONE_ROOT, override-able via the BENCHMANTIC_REPO_CACHE "
-                          "env var) instead of the default throwaway temp clone -- a later run against the "
-                          "same URL reuses it (fetch + checkout in place, not a full re-clone), including "
-                          "its .parameter_metadata_cache.json/.metric_metadata_cache.json, so repeat runs "
-                          "against the same remote benchmark don't re-query the LLM for everything every "
-                          "time. Implied by --clone-dir. Ignored for a local module_dir.")
-    ap.add_argument("--clone-dir", type=Path, default=None,
-                     help="Explicit directory to clone module_dir into, when it's a git URL, instead of "
-                          "either the default throwaway temp clone or --keep-clone's default persistent "
-                          "cache location. Implies --keep-clone (an explicit destination is a signal you "
-                          "intend to reuse it). Ignored for a local module_dir.")
-    ap.add_argument("--fresh-clone", action="store_true",
-                     help="With --keep-clone/--clone-dir: if a cached clone already exists at the target "
-                          "location, delete it and clone from scratch instead of fetching/checking it out "
-                          "in place. Has no effect on the default throwaway clone (already always fresh). "
-                          "Ignored for a local module_dir.")
-    ap.add_argument("--software", default="auto",
-                     help="The simulation software's name, e.g. DuMux. benchmantic uses "
-                          "software_descriptions/<name>.yaml, or lets the LLM write a description. "
-                          "Default: the LLM works out the software too.")
-    ap.add_argument("--software-description", default=None, metavar="FILE",
-                     help="Use this software description instead (it may be partial: the LLM fills in the "
-                          "rest), or 'llm' to have the LLM write a new one even if benchmantic has one.")
-    ap.add_argument("--save-software-description", default=None, action=argparse.BooleanOptionalAction,
-                     help="Save a description the LLM wrote to software_descriptions/ without asking "
-                          "(--no-save-software-description: never). Default: ask on a terminal.")
-    add_mapping_args(ap)
-    ap.add_argument("--output", type=Path, default=Path("metadata.jsonld"))
-    add_semantic_override_args(ap)
-    ap.add_argument("--scenario-params", type=str, default=None,
-                     help="Comma-separated list of raw parameter keys (e.g., 'Cells0,Cells1') that are scenario-specific. "
-                          "If omitted, you will be prompted interactively.")
-    ap.add_argument("--full-value-params", type=str, default=None,
-                     help="Comma-separated list of raw parameter keys (e.g., 'Radial0') whose params.input value has "
-                          "MULTIPLE whitespace-separated tokens (e.g. 'Radial0 = 1.0 1.5 2.0') that should ALL be "
-                          "captured as a list, instead of collapsing to a single value via the usual LLM-picked "
-                          "token index. Use this for parameters like a multi-value radius/coordinate list where "
-                          "every token matters, not just one.")
-    ap.add_argument("--provider", type=str, default=None,
-                     help="The LLM: " + ", ".join(PROVIDER_CONFIG) + ". Its API key: --llm-api-key, else "
-                          "LLM_API_KEY or the provider's usual variable (GROQ_API_KEY, ANTHROPIC_API_KEY, "
-                          "OPENAI_API_KEY), else it is asked for. Default: the first LLM whose variable is set "
-                          "(else groq).")
-    ap.add_argument("--llm-api-key", default=None, metavar="KEY",
-                    help="The API key of the chosen LLM, for this run. Not in run config files.")
-    ap.add_argument("--model", type=str, default=None,
-                     help="The model of that LLM (default: " + ", ".join(f"{p}: {c['default_model']}"
-                                                                for p, c in PROVIDER_CONFIG.items()) + ").")
-    ap.add_argument("--fallback-on-error", action="store_true",
-                     help="If the LLM call fails (e.g. quota exceeded, network error), fall back to "
-                          "local placeholder metadata (unitless, confidence 0.0) instead of exiting. "
-                          "These placeholders are NOT written to the cache, so a future run will retry the API.")
-    ap.add_argument("--verbose", action="store_true",
-                     help="Show what's normally collapsed into short checkmark lines: discovery details "
-                          "(resolved module path, README/executable/cache-clear lines) and, per LLM call, "
-                          "a one-line request header (endpoint, model, prompt size, estimated cost) plus "
-                          "response timing. Doesn't include the raw request/response text -- see --debug.")
-    ap.add_argument("--debug", action="store_true",
-                     help="Everything --verbose shows, PLUS the exact request/response text for every LLM "
-                          "call. Implies --verbose's level of detail even if --verbose isn't also passed.")
-    ap.add_argument("--clear-cache", action="store_true",
-                     help="Delete any existing parameter/metric metadata cache for this module "
-                          "before running, forcing fresh LLM inference for every selected item. "
-                          "Without this flag, stale cache entries that no longer correspond to a "
-                          "real params.input key or main.cc metric are pruned automatically, but "
-                          "still-valid cached entries are reused as normal.")
-    ap.add_argument("--skip-review", action="store_true",
-                     help="Skip the interactive review/edit step after AI inference and accept the "
-                          "inferred parameter/metric metadata as-is. Required for non-interactive/CI "
-                          "runs (this step needs a real terminal for input()), same as --scenario-params.")
-    ap.add_argument("--review-confidence-threshold", type=float, default=review.DEFAULT_CONFIDENCE_THRESHOLD,
-                     help=f"During review, mark any parameter/metric with confidence below this value with "
-                          f"a '!' in the table so it's easy to spot before pressing Enter to accept "
-                          f"(default: {review.DEFAULT_CONFIDENCE_THRESHOLD}). Doesn't block accepting on its own -- "
-                          "Enter always accepts the table as shown. Has no effect with --skip-review.")
-    ap.add_argument("--inference-batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                     help="Max parameters/metrics sent to the LLM in a single inference request "
-                          f"(default: {DEFAULT_BATCH_SIZE}). A benchmark with more not-yet-cached items than "
-                          "this is split into multiple independent requests instead of one large one. Each "
-                          "resulting chunk may be split further still if its own estimated token cost exceeds "
-                          "--inference-tpm-budget -- see that flag.")
-    ap.add_argument("--inference-tpm-budget", type=int, default=DEFAULT_TPM_BUDGET,
-                     help="Target tokens-per-minute budget for the inference step "
-                          f"(default: {DEFAULT_TPM_BUDGET:,}). Used two ways: (1) any --inference-batch-size "
-                          "chunk whose estimated cost (prompt + expected completion) exceeds this is split "
-                          "further, regardless of item count; (2) every request made during this run reserves "
-                          "its estimated cost against a shared budget before sending, so a burst of "
-                          "individually-small requests can't collectively exceed it either. Set this well "
-                          "BELOW your account's actual TPM cap, not equal to it -- token estimation is a "
-                          "heuristic (see ai.inference's CHARS_PER_TOKEN_ESTIMATE), and other activity on the "
-                          "same API key shares the same rolling window. E.g. on a 12,000 TPM account, try "
-                          "8,000-9,000, not 12,000.")
-    ap.add_argument("--skip-validation", action="store_true",
-                     help="Skip the automatic RO-Crate 1.1 conformance check that normally runs "
-                          "after writing the output (via the 'rocrate_validator' package -- "
-                          "`pip install roc-validator`). Use this if the package isn't installed "
-                          "or you don't have network access for it to fetch the profile.")
-    ap.add_argument("--validate-severity", type=str, default="REQUIRED",
-                     choices=["OPTIONAL", "RECOMMENDED", "REQUIRED"],
-                     help="Minimum issue severity to check/report for the RO-Crate conformance "
-                          "check (default: REQUIRED, i.e. only what the RO-Crate spec mandates -- "
-                          "pass RECOMMENDED or OPTIONAL for stricter best-practice checks).")
-    ap.add_argument("--outputs", type=str, default=None,
-                     help="Which artifacts to generate. Either a preset -- 'standard' (benchmark "
-                          "description + review report + dataset + snakefile, the default), 'snakefile' "
-                          "(description + review report + snakefile, no dataset), 'snakefile-only' "
-                          "(ONLY a Snakefile -- no semantic inference/LLM call, no benchmark "
-                          "description, no dataset, no review report; see snakefile.renderer's "
-                          "config_key() docstring for the parameters.json unit-suffix limitation this "
-                          "carries), 'dataset' (description + review report + dataset, no snakefile), "
-                          "'description-only'/'none' (description + review report only) -- or an "
-                          "explicit comma-separated list of 'dataset', 'snakefile' (description stays "
-                          "on; 'snakefile-only' is the only way to turn it off). Default: reuse the "
-                          "selection saved from this module's last run (.benchmantic_outputs.json), "
-                          "prompting interactively (real terminal only) the first time, or 'standard' "
-                          "with --skip-review / no real terminal.")
+    add_build_arguments(ap)
+    ap.add_argument("--output", type=Path, default=Path("metadata.jsonld"), help="The benchmark description to write.")
+    ap.add_argument("--validate-severity", type=str, default="REQUIRED", choices=["OPTIONAL", "RECOMMENDED", "REQUIRED"],
+                    help="Least severe RO-Crate issue to report (default: REQUIRED).")
     return ap
 
 
@@ -1510,6 +1460,38 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         # same resolve_source() call created. Runs even if _build_impl()
         # raised, so a failed run doesn't leave an orphaned temp clone.
         repo_source.cleanup_ephemeral_clone(resolved_module_dir)
+
+
+def _label_cases(cases: list[tuple[str, dict[str, Any]]],
+                 fields: dict[str, dict[str, Any]]) -> list[tuple[str, dict[str, Any], str]]:
+    """(case id, values, label) for each case. The label names the case's
+    cells ("40 cells radial, 160 cells angular"); when that doesn't tell the
+    cases apart (e.g. a grid refined globally keeps its Cells0/Cells1), the
+    numeric parameters whose values differ between the cases are added
+    ("16 cells radial, 128 cells angular, grid_refinement_level 1")."""
+    def name(key: str) -> str:
+        return fields.get(key, {}).get("semantic_name", "") or key
+
+    def is_number(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    varying = [k for k in (cases[0][1] if cases else {})
+               if not name(k).lower().startswith("cells_")
+               and all(is_number(p.get(k)) for _, p in cases)
+               and len({json.dumps(p.get(k)) for _, p in cases}) > 1]
+    labels = []
+    for case_id, params in cases:
+        parts = [f"{v} cells {name(k)[len('cells_'):]}" for k, v in params.items()
+                 if name(k).lower().startswith("cells_")]
+        labels.append((case_id, params, parts))
+    cell_labels = [", ".join(parts) for _, _, parts in labels]
+    unique = len(set(cell_labels)) == len(cell_labels)
+    out = []
+    for case_id, params, parts in labels:
+        if not unique:
+            parts = parts + [f"{name(k)} {params[k]}" for k in varying]
+        out.append((case_id, params, ", ".join(parts) or case_id))
+    return out
 
 
 def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
@@ -1916,17 +1898,13 @@ def _build_impl(args: argparse.Namespace) -> dict[str, Any]:
     for conf in (reference.configurations if reference is not None else []):
         values = {k: v for k, v in conf["values"].items() if k in filtered_parameter_fields}
         config_ids.append(builder.add_configuration(conf["id"], conf["label"] or conf["id"], values))
+    resolved_cases = []
     for case_dir, case_id in (cases if reference is None else []):
         try:
-            params = adapter.resolve_case_params(case_dir, filtered_parameter_fields)
+            resolved_cases.append((case_id, adapter.resolve_case_params(case_dir, filtered_parameter_fields)))
         except ValueError as exc:
             sys.exit(f"Error: {exc}")
-        cell_parts = []
-        for k, v in params.items():
-            name = filtered_parameter_fields[k].get("semantic_name", "")
-            if name.lower().startswith("cells_"):
-                cell_parts.append(f"{v} cells {name[len('cells_'):]}")
-        label = ", ".join(cell_parts) or case_id
+    for case_id, params, label in _label_cases(resolved_cases, filtered_parameter_fields):
         config_ids.append(builder.add_configuration(case_id, label, params))
 
     builder.add_benchmark_node(config_ids, metric_ids)

@@ -79,6 +79,7 @@ def render_mapped(adapter, mapping: dict[str, Any], hints: dict[str, Any], args,
 # *_mapping.json), which the program is given on its command line. Run it in a
 # folder holding parameters.json, as run_benchmark.py prepares it.
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -94,6 +95,8 @@ local_copy_root = {hints.get("local_copy_root")!r}
 implementation_in_copy = {hints.get("implementation_in_copy", ".")!r}
 template_case_file = {hints.get("template_case_file")!r}      # the parameter file the case's is made from
 container_image = {args.container_image!r}
+# BENCHMARK_CONTAINER (e.g. a .sif built in CI) overrides the published image
+container_uri = os.environ.get("BENCHMARK_CONTAINER") or f"docker://{{container_image}}"
 
 with open("parameters.json") as f:
     config = json.load(f)
@@ -159,7 +162,7 @@ rule run_simulation:
     resources:
         serial_run=1
     singularity:
-        f"docker://{{container_image}}"
+        container_uri
     run:
         # 1. a fresh copy of the implementation
         work = Path("work")

@@ -52,12 +52,6 @@ class FoamEntry:
         """Value tokens with list parentheses removed: '(0 0 1)' -> ['0','0','1']."""
         return self.value.replace("(", " ").replace(")", " ").split()
 
-    @property
-    def is_numeric(self) -> bool:
-        toks = self.tokens
-        return bool(toks) and all(_NUMBER_PATTERN.match(t) for t in toks)
-
-
 def _tokenize(text: str) -> list[tuple[str, int]]:
     """(token, line) pairs; comments dropped."""
     tokens: list[tuple[str, int]] = []

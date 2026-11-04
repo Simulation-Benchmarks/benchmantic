@@ -1,0 +1,38 @@
+[
+  {
+    "key": "l2_error_pressure_rel",
+    "semantic_name": "pressure_l2_error_relative",
+    "datatype": "schema:Double",
+    "unit": "unit:UNITLESS",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/DimensionlessRatio",
+    "confidence": 0.95,
+    "explanation": "Relative L2 error of pressure against the analytical Taylor-Couette solution; the 'rel' suffix makes it a dimensionless ratio."
+  },
+  {
+    "key": "l2_error_velocity_rel",
+    "semantic_name": "velocity_l2_error_relative",
+    "datatype": "schema:Double",
+    "unit": "unit:UNITLESS",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/DimensionlessRatio",
+    "confidence": 0.95,
+    "explanation": "Relative L2 error of velocity against the analytical solution; normalized, so dimensionless."
+  },
+  {
+    "key": "l2_error_pressure",
+    "semantic_name": "pressure_l2_error_absolute",
+    "datatype": "schema:Double",
+    "unit": "unit:PA",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Pressure",
+    "confidence": 0.9,
+    "explanation": "Absolute L2 error norm of the pressure field (pressureAbs), carrying the SI unit of pressure."
+  },
+  {
+    "key": "l2_error_velocity",
+    "semantic_name": "velocity_l2_error_absolute",
+    "datatype": "schema:Double",
+    "unit": "unit:M-PER-SEC",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Velocity",
+    "confidence": 0.9,
+    "explanation": "Absolute L2 error norm of the velocity field (velocityAbs), carrying the SI unit of velocity."
+  }
+]

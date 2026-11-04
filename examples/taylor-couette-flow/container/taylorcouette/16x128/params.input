@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright © DuMux Project contributors, see AUTHORS.md in root folder
+# SPDX-FileCopyrightText: 2026 The taylor-couette-flow authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Taylor-Couette flow, Re = 100: the coarse cake grid of 16 x 128 cells,
+# globally refined 0 time(s) (16 cells across the gap, 128 around).
+
+[Grid]
+Radial0 = 1.0 2.0 # [m]
+Angular1 = 0.0 360.0 # [deg]
+Cells0 = 16
+Cells1 = 128
+Refinement = 0
+
+[Problem]
+Name = taylorcouette_16x128
+Omega1 = 100.0 # [rad/s]
+Omega2 = 0.0 # [rad/s]
+EnableGravity = false
+EnableInertiaTerms = true
+
+[Flux]
+UpwindWeight = 0.5
+
+[Component]
+LiquidDensity = 1.0 # [kg/m^3]
+LiquidDynamicViscosity = 1.0 # [Pa*s]

@@ -6,98 +6,23 @@
 """
 describe_benchmark.py
 
-The only entry point for this package. Generates the semantic benchmark
-description, its dataset-provenance sidecar, and a Snakefile from a
-benchmark module, calling metadata.builder and snakefile.generator directly
-in-process (not via subprocess), and writes all three artifacts together
-into outputs/<software-name>/, matching this pattern from run-benchmark.yml:
+Describes a benchmark implementation: finds its inputs and output metrics,
+asks the LLM what they mean (you review the answers), and writes to
+outputs/<software-name>/:
 
-    cd $GITHUB_WORKSPACE/outputs/<software-name>
-    python3 run_benchmark.py \\
-        --benchmark-file <benchmark-filename> \\
-        --result-path ./results
+    <name>_benchmark.jsonld   the description: parameters, configurations, metrics
+    <name>_dataset.jsonld     authors, license, software dependencies
+    <name>_mapping.json       the benchmark's parameters -> the software's inputs
+    Snakefile                 runs one configuration in the container
+    review.md                 everything above as Markdown tables
 
-Produces (depends on the Outputs step / --outputs -- see metadata.builder):
-    outputs/<software-name>/<benchmark-filename>  -- metadata.builder's
-                                                       RO-Crate JSON-LD
-                                                       (parameters, metrics,
-                                                       processing steps),
-                                                       loadable by
-                                                       semantic_benchmark.BenchmarkLoader
-    outputs/<software-name>/<dataset-filename>     -- sidecar dataset-
-                                                       provenance document
-                                                       (author, publisher,
-                                                       software
-                                                       dependencies) -- see
-                                                       metadata.builder's
-                                                       GraphBuilder.build_dataset_graph()
-    outputs/<software-name>/Snakefile              -- snakefile.generator's
-                                                       Snakefile, as a plain
-                                                       file (not zipped)
-    outputs/<software-name>/review.md              -- show_description.py's
-                                                       human-readable table
+--outputs picks which of these (snakefile-only: just the Snakefile, no LLM).
+Every option also works as a key of a run config (--config). Without
+--scenario-params you are asked which inputs differ between configurations,
+and without --skip-review you review the LLM's answers -- both need a terminal.
 
-With --outputs snakefile-only (or the "Workflow only" interactive preset),
-ONLY outputs/<software-name>/Snakefile (plus its per-case parameters.json
-previews) is produced -- no benchmark.jsonld, no dataset sidecar, no
-review.md. This mode skips semantic inference (no Groq/OpenAI call, no
-GROQ_API_KEY/OPENAI_API_KEY required) entirely, deriving each parameter's
-value straight from params.input via static discovery. The one real cost:
-none of the parameters get a unit-inferred name, and NO parameter gets the
-usual bracketed unit-suffix on its parameters.json key (e.g. "Grid.Radial0"
-stays "Grid.Radial0", never "Grid.Radial0[m]") -- if the actual
-run_benchmark.py your container runs expects a unit-suffixed key for a
-parameter whose real-world unit is meters or pascals, that key won't match
-at runtime. See README.md's "Config files" section before relying on this
-mode for a benchmark with meter/pascal-valued parameters.
-
-Not tied to any one simulation tool: which software the benchmark uses,
-and how to read it, comes from --software (a name, a software config file,
-or a `software:` block in --config; see software/__init__.py) -- run it
-once per tool (DuMux, OpenFOAM, ...) with that tool's own --software and
---container-image.
-
-The output directory is always outputs/<software-name>/ (--software-name,
-or if that's not given, the software name derived from the generated
-benchmark file itself -- its local:software label, slugified, e.g. "DuMux"
--> "dumux"). Since the software name (and, unless --benchmark-filename/
---dataset-filename were given, both generated filenames) only exist after
-metadata.builder has run, this script generates the benchmark file and its
-dataset sidecar to a staging location first, derives the names from it if
-needed, then moves all three artifacts into outputs/<software-name>/
-together.
-
-By default, output is quiet -- one short line per step, with the full
-underlying output only shown if something fails. Pass --verbose (-v) to
-always see it live. Exception: if --scenario-params isn't given, or unless
---skip-review is passed, the interactive parameter-selection prompt and/or
-metadata review step always run live (both need a real terminal for
-input()), regardless of --verbose.
-
-After AI inference, each discovered parameter/metric is shown in a table
-for review -- edit any field, loop until you confirm it's final, then the
-(possibly corrected) result is what gets cached and built into
-benchmark.jsonld. Pass --skip-review to accept the AI's output as-is (e.g.
-for CI). Anything you correct is also remembered across benchmarks (see
-ai.corrections) and offered back to the AI as guidance next time it infers
-a similarly named/typed item.
-
-Usage
------
-    python3 describe_benchmark.py <module_dir> \\
-        --scenario-params Cells0,Cells1,Grading0,Radial0,Name,Omega1,Omega2 \\
-        --full-value-params Radial0 \\
-        --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
-        --container-shared-dir /dumux/shared \\
-        --software DuMux --zip-name-flag Problem.Name
-
---software-name isn't needed above -- it's derived automatically from the
-generated benchmark file (e.g. "DuMux" -> "dumux"). Pass it explicitly only
-to override that derived name.
-
-<module_dir> can be the exact benchmark folder, a repo checkout, or a
-GitHub/GitLab/any git URL -- metadata.builder resolves it the same way it
-always does (see metadata/repo_source.py for the URL-clone case).
+    python3 describe_benchmark.py --config my-benchmark.yaml
+    python3 describe_benchmark.py path/or/link --software DuMux --container-image IMAGE
 """
 
 from __future__ import annotations
@@ -205,150 +130,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("module_dir", type=str, nargs="?", default=None,
-                     help="Path to the benchmark module (or a repo checkout containing it) -- "
-                          "anything metadata.builder can already handle. Also accepts a GitHub/GitLab/"
-                          "any git-reachable URL (https://..., git://..., or an scp-like git@host:path "
-                          "spec), or a link to a file or folder as the browser shows it "
-                          "(.../blob/<branch>/<path>, .../tree/<branch>/<path>), or a local file path; "
-                          "by default it's cloned into a throwaway temp directory that's deleted "
-                          "once this run finishes -- see --keep-clone/--ref/--clone-dir/--fresh-clone. "
-                          "Required, but may instead come from a 'module_dir:' key in --config.")
+    builder.add_build_arguments(ap, module_dir_optional=True)
     ap.add_argument("--config", type=Path, default=None,
-                     help="YAML file of flag defaults (see config.py) -- any flag also given explicitly "
-                          "on the command line overrides the same key here. Lets a benchmark's usual "
-                          "flag set live in a file instead of being retyped every run.")
-    ap.add_argument("--ref", type=str, default=None,
-                     help="Branch, tag, or commit to check out when module_dir is a git URL. Ignored for "
-                          "a local module_dir. Default: the remote's default branch.")
-    ap.add_argument("--keep-clone", action="store_true",
-                     help="If module_dir is a git URL, clone it into a persistent local cache directory "
-                          "instead of the default throwaway temp clone, so a later run against the same "
-                          "URL reuses it (fetch + checkout in place) along with its inference cache, "
-                          "instead of re-querying the LLM for everything every time. Implied by "
-                          "--clone-dir. Ignored for a local module_dir.")
-    ap.add_argument("--clone-dir", type=Path, default=None,
-                     help="Explicit directory to clone module_dir into, when it's a git URL, instead of "
-                          "either the default throwaway temp clone or --keep-clone's default persistent "
-                          "cache location (repo_source.DEFAULT_CLONE_ROOT, override-able via the "
-                          "BENCHMANTIC_REPO_CACHE env var). Implies --keep-clone. Ignored for a local "
-                          "module_dir.")
-    ap.add_argument("--fresh-clone", action="store_true",
-                     help="With --keep-clone/--clone-dir: if a cached clone already exists at the target "
-                          "location, delete it and clone from scratch instead of fetching/checking it out "
-                          "in place. Has no effect on the default throwaway clone (already always fresh). "
-                          "Ignored for a local module_dir.")
-    ap.add_argument("--software-name", default=None,
-                     help="Software name -- all three artifacts (benchmark file, dataset file, Snakefile) are "
-                          "written together to outputs/<software-name>/, and it's passed through as "
-                          "snakefile.generator's --software-name. Default: derived from the generated "
-                          "benchmark file itself (its local:software label, slugified, e.g. 'DuMux' -> 'dumux').")
-    ap.add_argument("--benchmark-filename", default=None,
-                     help="Filename for the generated semantic description (parameters, metrics, processing "
-                          "steps -- what semantic_benchmark.BenchmarkLoader reads). Default: derived from the "
-                          "benchmark's own name (the root entity's 'name' field, e.g. 'rotating cylinders'), "
-                          "slugified, as '<slug>_benchmark.jsonld' -- or just '<slug>.jsonld' if the name "
-                          "already contains the word 'benchmark'. Pass this explicitly to force a specific "
-                          "name instead, e.g. if your run_benchmark.py --benchmark-file argument is hardcoded "
-                          "to 'benchmark.jsonld' or 'benchmark.json'.")
-    ap.add_argument("--dataset-filename", default=None,
-                     help="Filename for the sidecar dataset-provenance file (author, publisher, software "
-                          "dependencies -- see metadata.builder's GraphBuilder.build_dataset_graph()), written "
-                          "alongside the benchmark file. Default: same slug as --benchmark-filename's default, "
-                          "as '<slug>_dataset.jsonld' (or '<slug>.jsonld' if the name already contains "
-                          "'dataset').")
+                    help="Run config (YAML): its keys are the defaults of these options; the command line wins.")
+    out = ap.add_argument_group("output files")
+    out.add_argument("--software-name", default=None,
+                     help="Write to outputs/<software-name>/ (default: the software, e.g. 'dumux').")
+    out.add_argument("--benchmark-filename", default=None,
+                     help="Name of the benchmark description (default: <benchmark name>_benchmark.jsonld).")
+    out.add_argument("--dataset-filename", default=None,
+                     help="Name of the dataset description (default: <benchmark name>_dataset.jsonld).")
 
-    # --- metadata.builder pass-through ---
-    meta = ap.add_argument_group("metadata.builder options")
-    meta.add_argument("--software", default="auto",
-                       help="The simulation software's name, e.g. DuMux. benchmantic uses "
-                              "software_descriptions/<name>.yaml, or lets the LLM write a description. "
-                              "Default: the LLM works out the software too.")
-    meta.add_argument("--software-description", default=None, metavar="FILE",
-                       help="Use this software description instead (it may be partial: the LLM fills in the "
-                              "rest), or 'llm' to have the LLM write a new one even if benchmantic has one.")
-    meta.add_argument("--save-software-description", default=None, action=argparse.BooleanOptionalAction,
-                       help="Save a description the LLM wrote to software_descriptions/ without asking "
-                              "(--no-save-software-description: never). Default: ask on a terminal.")
-    builder.add_mapping_args(meta)
-    builder.add_semantic_override_args(meta)
-    meta.add_argument("--scenario-params", type=str, default=None)
-    meta.add_argument("--full-value-params", type=str, default=None)
-    meta.add_argument("--provider", type=str, default=None)
-    meta.add_argument("--llm-api-key", default=None, metavar="KEY",
-                      help="The API key of the chosen LLM, for this run (else LLM_API_KEY or the provider's "
-                           "usual variable, else it is asked for). Not in run config files.")
-    meta.add_argument("--model", type=str, default=None)
-    meta.add_argument("--clear-cache", action="store_true")
-    meta.add_argument("--fallback-on-error", action="store_true")
-    meta.add_argument("--no-model-fallback", action="store_true",
-                       help="Disable automatic fallback to a different model when the current one hits its "
-                            "provider tokens-per-day (TPD) quota mid-run (on by default -- see PROVIDER_CONFIG "
-                            "in ai/inference.py for why this helps on Groq, whose TPD quota is tracked per "
-                            "model rather than account-wide: a model that runs out doesn't mean the account "
-                            "has, so an available alternate model this key can access is tried automatically "
-                            "instead of stopping the run. Once switched, that model is used for the rest of "
-                            "this run's inference calls. Pass this flag to go back to failing immediately "
-                            "instead, e.g. if you specifically need results from one named --model.)")
-    meta.add_argument("--skip-review", action="store_true",
-                       help="Skip the interactive review/edit step after AI inference (required for "
-                            "non-interactive/CI runs -- it needs a real terminal for input()).")
-    meta.add_argument("--review-confidence-threshold", type=float, default=None,
-                       help="Mark parameters/metrics below this confidence with a '!' in the review table "
-                            "so they're easy to spot before pressing Enter to accept (default: see "
-                            "metadata.builder's own default). Doesn't block accepting on its own -- Enter "
-                            "always accepts the table as shown. Has no effect with --skip-review.")
-    meta.add_argument("--inference-batch-size", type=int, default=None,
-                       help="Max parameters/metrics sent to the LLM in a single inference request "
-                            "(default: see metadata.builder's own default). A benchmark with more "
-                            "not-yet-cached items than this is split into multiple independent requests -- "
-                            "lower this if you're hitting a provider's per-request token/payload limit.")
-    meta.add_argument("--inference-tpm-budget", type=int, default=None,
-                       help="Target tokens-per-minute budget for the inference step (default: see "
-                            "metadata.builder's own default). Every request's estimated cost is kept under "
-                            "this (splitting batches further if needed) and reserved against a shared budget "
-                            "across the whole run, not just checked per-request. Set it well below your "
-                            "account's actual TPM cap, not equal to it -- e.g. 8,000-9,000 on a 12,000 TPM "
-                            "account.")
-    meta.add_argument("--skip-validation", action="store_true")
-    meta.add_argument("--outputs", type=str, default=None,
-                       help="Which artifacts to generate. Presets: 'standard' -- benchmark description + "
-                            "review report + dataset + snakefile (the default); 'snakefile' -- description "
-                            "+ review report + snakefile, no dataset; 'snakefile-only' -- ONLY a Snakefile, "
-                            "built from statically-discovered parameter values, with NO semantic inference "
-                            "(no Groq/OpenAI call), no benchmark.jsonld, no dataset sidecar, no review "
-                            "report -- see this script's module docstring for the parameters.json "
-                            "unit-suffix limitation this mode carries; 'dataset' -- description + review "
-                            "report + dataset, no snakefile; 'description-only'/'none' -- description + "
-                            "review report only. Or an explicit comma-separated list of 'dataset','snakefile' "
-                            "(description stays on; 'snakefile-only' is the only way to turn it off). "
-                            "Default: reuse the module's saved selection, prompting interactively the "
-                            "first time (real terminal only).")
-
-    # --- snakefile.generator pass-through ---
-    snake = ap.add_argument_group("snakefile.generator options")
+    snake = ap.add_argument_group("the Snakefile")
     snake.add_argument("--container-image", default=None,
-                        help="Required, but may instead come from a 'container-image:' key in --config.")
+                       help="The container image the simulation runs in (required; or `container:` in --config).")
     snake.add_argument("--container-shared-dir", default=None,
-                        help="Folder inside the container where results are saved. Default: "
-                             "`results_folder` in the software description.")
-    snake.add_argument("--executable", default=None)
-    snake.add_argument("--build-dir", default=None)
-    snake.add_argument("--results-subdir", default="results")
-    snake.add_argument("--unit-symbol", action="append", default=None)
-
-    # --- options of the Snakefile styles (snakefile/styles/) ---
+                       help="Folder in the container where results are saved (default: the software description's).")
+    snake.add_argument("--executable", default=None, help="The program to run (default: found in CMakeLists.txt).")
+    snake.add_argument("--build-dir", default=None, help="Folder in the container to run it in.")
+    snake.add_argument("--results-subdir", default="results", help="Subfolder for each configuration's results.")
+    snake.add_argument("--unit-symbol", action="append", default=None, metavar="QUDT_UNIT=SYMBOL",
+                       help="Unit suffix of parameters.json keys, e.g. unit:M=m (repeatable).")
     snakefile_styles.add_arguments(ap)
-
-    ap.add_argument("-v", "--verbose", action="store_true",
-                     help="Show the full underlying build output live, instead of the default short "
-                          "progress lines (still shown on failure either way). Includes discovery detail "
-                          "and, per LLM call, a one-line request header -- not the raw request/response "
-                          "text itself, see --debug.")
-    ap.add_argument("--debug", action="store_true",
-                     help="Everything --verbose shows, PLUS the exact request/response text for every "
-                          "LLM call. Implies --verbose's level of detail even if --verbose isn't also "
-                          "passed, and (like --verbose) always shows the step live.")
 
     return ap
 
@@ -413,52 +216,11 @@ def run(args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None
     # was given explicitly, the benchmark filename itself) depends on
     # reading it back: the software name and the benchmark's own name both
     # live in the graph itself, not something known beforehand.
-    builder_args = argparse.Namespace(
-        module_dir=args.module_dir,
-        ref=args.ref,
-        clone_dir=args.clone_dir,
-        fresh_clone=args.fresh_clone,
-        keep_clone=args.keep_clone,
-        output=staged_benchmark,
-        research_problem_label=args.research_problem_label,
-        research_problem_id=args.research_problem_id,
-        math_model_label=args.math_model_label,
-        math_model_id=args.math_model_id,
-        no_mardi_lookup=args.no_mardi_lookup,
-        software=args.software,
-        software_description=args.software_description,
-        save_software_description=args.save_software_description,
-        reference_benchmark=args.reference_benchmark,
-        no_reference=args.no_reference,
-        parameter_names=args.parameter_names,
-        scenario_params=args.scenario_params,
-        full_value_params=args.full_value_params,
-        provider=args.provider,
-        model=args.model,
-        fallback_on_error=args.fallback_on_error,
-        verbose=args.verbose or args.debug,
-        debug=args.debug,
-        clear_cache=args.clear_cache,
-        skip_review=args.skip_review,
-        review_confidence_threshold=(
-            args.review_confidence_threshold
-            if args.review_confidence_threshold is not None
-            else builder.review.DEFAULT_CONFIDENCE_THRESHOLD
-        ),
-        inference_batch_size=(
-            args.inference_batch_size
-            if args.inference_batch_size is not None
-            else builder.DEFAULT_BATCH_SIZE
-        ),
-        inference_tpm_budget=(
-            args.inference_tpm_budget
-            if args.inference_tpm_budget is not None
-            else builder.DEFAULT_TPM_BUDGET
-        ),
-        skip_validation=args.skip_validation,
-        validate_severity="REQUIRED",
-        outputs=args.outputs,
-    )
+    builder_dests = {a.dest for a in builder.build_arg_parser()._actions if a.dest != "help"}  # noqa: SLF001
+    builder_args = argparse.Namespace(**{d: getattr(args, d) for d in builder_dests if hasattr(args, d)})
+    builder_args.output = staged_benchmark
+    builder_args.validate_severity = "REQUIRED"
+    builder_args.verbose = args.verbose or args.debug
     # Two sub-steps inside metadata.builder.build() need a real terminal
     # (they call input()), so their output can't be silently captured into
     # the quiet-mode buffer the way the rest of this step's output can:

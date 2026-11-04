@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+#
+# Taylor-Couette flow (rotating cylinders) with DuMux: "Taylor-Couette Flow" in
+# https://dumux.org/docs/doxygen/master/benchmarks.html, adapted to write
+# solution_metrics.json (container/taylorcouette/main.cc). From the benchmantic folder:
+#
+#   python3 workflow.py --config examples/taylor-couette-flow/benchmantic.yaml
+#   python3 create_benchmark_repo.py --config examples/taylor-couette-flow/benchmantic.yaml
+#
+# The reviewed answers of the LLM are stored next to the implementation
+# (.parameter_metadata_cache.json, .metric_metadata_cache.json); delete them, or
+# pass --clear-cache, to ask the LLM again. Paths are relative to this file.
+
+implementation: container/taylorcouette
+software: DuMux
+container: ghcr.io/simulation-benchmarks/dumux-taylor-couette:3.11-dev
+reference: none
+
+scenario-params: Radial0,Cells0,Cells1,Refinement,Omega1,Omega2,Name   # the inputs that differ between configurations
+full-value-params: Radial0
+skip-review: true
+outputs: standard
+build-dir: /dumux/dumux/build-cmake/test/freeflow/navierstokes/taylorcouette
+zip-name-flag: Problem.Name
+software-name: dumux
+
+# create_benchmark_repo.py: the benchmark catalog repository
+repository:
+  name: taylor-couette-flow            # the benchmark's title in the DuMux list
+  title: Taylor-Couette Flow Benchmark
+  summary: >-
+    A benchmark for the steady viscous flow between two concentric rotating cylinders
+    (circular Couette flow, Re = 100), compared with the analytical solution on three
+    successively refined grids.
+  documentation: documentation.md
+  container: container                 # the Dockerfile's folder; the CI builds it
+  software_version: 3.11-dev
+  software_url: https://dumux.org
+  authors:
+    - Sarbani Roy; 0000-0002-5990-0076; University of Stuttgart
+  keywords: [benchmark, computational fluid dynamics, Taylor-Couette flow, rotating cylinders, NFDI4ING, model validation, FAIR4RS, REUSE]

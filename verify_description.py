@@ -6,42 +6,21 @@
 """
 verify_description.py
 
-Validates a metadata.builder-produced benchmark.jsonld in two stages:
+Checks a benchmark description in two steps, and fails if either fails:
 
-1. SHACL validation (the main gate) -- the file is checked against the
-   SHACL shapes bundled with the `semantic_benchmark` package
-   (BenchmarkLoader.load_shapes()), using pyshacl with the same settings
-   the loader itself uses (RDFS inference). Every sh:Violation is printed,
-   grouped by constraint, with the offending nodes listed. Any violation
-   fails the run.
+1. SHACL: against the shapes of the semantic-benchmark package (every
+   violation is listed, grouped by constraint). BenchmarkLoader runs these
+   shapes too but only logs them, so this script reports them itself.
+2. Loading it with semantic_benchmark.BenchmarkLoader, and what the shapes
+   can't express: a processing step, a value on every parameter, a field
+   mapping for every metric (--shacl-only skips this).
 
-   Note: BenchmarkLoader also runs these shapes internally, but it never
-   raises -- it only writes a `<file>.shacl.log` next to the input and
-   keeps loading. That's why this script runs the validation itself and
-   reports the result directly.
-
-2. Loader checks -- the file is loaded with the real
-   semantic_benchmark.BenchmarkLoader, and a few things the shapes don't
-   express are checked: at least one m4i:ProcessingStep exists, every
-   parameter carries a value (and isn't mis-typed m4i:NumericalVariable),
-   and every metric has a resolvable field mapping. Skip with --shacl-only.
-
-Install:
-
-    pip install semantic-benchmark      # brings rdflib + pyshacl
-
-The pip-installed package is used. A local git clone of semantic-benchmark
-is only used when asked for (--semantic-benchmark-src or
-SEMANTIC_BENCHMARK_SRC -- e.g. to try changes to the shapes), or as a last
-resort when the package isn't installed (a sibling/child ./semantic-benchmark).
-
-Usage
------
-    python3 verify_description.py benchmark.jsonld
-    python3 verify_description.py benchmark.jsonld --shacl-only
+    python3 verify_description.py benchmark.jsonld [--shacl-only] [--report FILE]
     python3 verify_description.py benchmark.jsonld --shapes my-shapes.ttl
-    python3 verify_description.py benchmark.jsonld --report shacl-report.txt
-    python3 verify_description.py --export-shapes benchmark-shapes.ttl
+    python3 verify_description.py --export-shapes shapes.ttl
+
+The installed package is used; --semantic-benchmark-src (or
+SEMANTIC_BENCHMARK_SRC) points at a clone instead, e.g. to try new shapes.
 """
 
 from __future__ import annotations

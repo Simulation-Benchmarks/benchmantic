@@ -6,33 +6,12 @@
 """
 show_description.py
 
-Renders a metadata.builder-produced benchmark.jsonld RO-Crate graph as
-human-readable Markdown tables for manual verification: benchmark/manifest
-info, pinned dependency versions, input parameters, and output metrics.
+Shows a benchmark description as Markdown tables -- the benchmark, its
+dependencies, parameters and metrics -- and saves them as review.md next to
+it. The dataset description (<name>_dataset.jsonld, with authors and
+dependencies) is found next to it, or given with --dataset-jsonld.
 
-Author/publisher/dependency info lives in a separate sidecar file --
-"<benchmark-name>_dataset.jsonld", written alongside the benchmark file by
-describe_benchmark.py (see metadata.builder.GraphBuilder.build_dataset_graph())
--- rather than in the benchmark file itself. This script auto-discovers
-that sibling file next to the one you pass in (or accepts --dataset-jsonld
-to point at it explicitly) and merges it back in for display, so the
-rendered tables look the same as when everything lived in one file. If no
-sidecar is found, those rows/sections are just omitted -- not an error.
-
-Usage
------
-    python3 show_description.py rotating_cylinders_benchmark.jsonld
-    python3 show_description.py rotating_cylinders_benchmark.jsonld --output review.md
-    python3 show_description.py rotating_cylinders_benchmark.jsonld --no-save
-    python3 show_description.py rotating_cylinders_benchmark.jsonld \\
-        --dataset-jsonld rotating_cylinders_dataset.jsonld
-
-Always prints to stdout. Also always saves a copy as review.md right next
-to the input file by default -- e.g. outputs/dumux/rotating_cylinders_benchmark.jsonld
--> outputs/dumux/review.md -- so the rendered table lives alongside the
-benchmark file and the Snakefile, not just in your terminal history.
-Override the saved filename/location with --output, or skip saving
-entirely with --no-save.
+    python3 show_description.py outputs/dumux/<name>_benchmark.jsonld [--output FILE] [--no-save]
 """
 
 from __future__ import annotations

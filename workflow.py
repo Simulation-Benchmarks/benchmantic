@@ -6,56 +6,17 @@
 """
 workflow.py
 
-Runs the full local dev loop in one command:
+The whole check in one command: describe_benchmark.py, then
+show_description.py (review.md), then verify_description.py. Its exit code is
+the verification's, so `workflow.py ... && publish` is safe in CI.
 
-    describe_benchmark  -->  show_description  -->  verify_description
+    python3 workflow.py --config my-benchmark.yaml
 
-1. describe_benchmark generates the benchmark file, its dataset-provenance
-   sidecar, and the Snakefile (a plain file, not zipped) into
-   outputs/<software-name>/.
-2. show_description renders the benchmark file (merged with its sibling
-   dataset file, if found -- see show_description.py) as Markdown tables,
-   so you can eyeball what got extracted.
-3. verify_description validates it against what semantic_benchmark actually
-   needs (see that script for details), and this script's own exit code
-   mirrors its result -- so `workflow.py ... && echo ok` behaves the way
-   you'd expect in CI.
+Takes every option of describe_benchmark.py, plus:
 
-All of describe_benchmark's own options (module_dir, --scenario-params,
---container-image, --software, etc.) are accepted here too and passed
-straight through -- run `python3 describe_benchmark.py --help` for the full
-list, since this script doesn't duplicate that help text. Two extra
-options control the later steps:
-
-    --semantic-benchmark-src PATH   a semantic-benchmark clone for verify_description
-                                     (default: the pip-installed package)
-    --show-output PATH              passed through to show_description
-                                     (saves the tables to a file instead of
-                                     printing them)
-    --skip-show / --skip-check      skip either later step
-    --config PATH                   YAML file of flag defaults, covering
-                                     both this script's own flags above and
-                                     everything describe_benchmark accepts
-                                     -- see config.py. A flag also given
-                                     explicitly on the command line always
-                                     overrides the same key in the file.
-
-Usage
------
-    python3 workflow.py <module_dir> \\
-        --scenario-params Cells0,Cells1,Grading0,Radial0,Name,Omega1,Omega2 \\
-        --full-value-params Radial0 \\
-        --container-image git.iws.uni-stuttgart.de:4567/benchmarks/rotating-cylinders:3.1 \\
-        --container-shared-dir /dumux/shared \\
-        --software DuMux --zip-name-flag Problem.Name
-
-    # ...or, with the same flags saved in a file (see config.py for the
-    # exact key names -- same as the flags above, minus the leading "--"):
-    python3 workflow.py --config rotating-cylinders.yaml
-
-Note: -h/--help here shows describe_benchmark's help (since its parser
-consumes whatever it recognizes first) -- run the three scripts' own
---help separately for their full option lists.
+    --skip-show / --skip-check      leave out show_description / verify_description
+    --show-output PATH              where show_description saves its tables
+    --semantic-benchmark-src PATH   a semantic-benchmark clone to verify against
 """
 
 from __future__ import annotations

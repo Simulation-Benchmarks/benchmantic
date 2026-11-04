@@ -41,3 +41,9 @@ Thumbs.db
 .*_cache.json
 .benchmantic_outputs.json
 .semantic_links_cache.json
+
+# The bundled examples keep their reviewed semantic metadata: it is what lets
+# their run configs (and the CI) describe them without an LLM.
+!examples/**/.parameter_metadata_cache.json
+!examples/**/.metric_metadata_cache.json
+!examples/**/.benchmantic_outputs.json

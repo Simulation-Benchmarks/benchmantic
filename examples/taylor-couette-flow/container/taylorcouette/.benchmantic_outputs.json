@@ -1,0 +1,5 @@
+{
+  "description": true,
+  "dataset": true,
+  "snakefile": true
+}

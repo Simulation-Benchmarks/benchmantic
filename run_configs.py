@@ -6,29 +6,13 @@
 """
 run_configs.py
 
-Runs workflow.py once for every run config in a folder, one after another.
-Run it in the folder with the configs (it can sit there too):
+Runs workflow.py for every run config in a folder (files without an
+`implementation:` key are skipped). A failing run doesn't stop the others; a
+summary lists how each went, and the exit code is non-zero if any failed.
 
-    cd /Users/sarbani/NFDI_Benchmark/configs_for_benchmantic
-    python3 run_configs.py
-
-is the same as running
-
-    python3 workflow.py --config <folder>/<file>.yaml
-
-for each run config there. Files that are not run configs (no
-`implementation:` key, e.g. a software description kept next to them) are
-skipped. A failing run doesn't stop the others; a summary at the end lists
-how each went, and the exit code is non-zero if any failed.
-
-By default every run uses this terminal, so you can answer the parameter
-selection and the reviews as usual. With --logs DIR the runs don't ask
-anything (--skip-review is passed) and each one's output goes to
-DIR/<config name>.log instead -- for running all of them unattended.
-
-    python3 run_configs.py <folder> --only "rotating*"    only some of them
-    python3 run_configs.py <folder> --dry-run             show what would run
-    python3 run_configs.py <folder> --stop-on-error       stop at the first failure
+    python3 run_configs.py <folder>                    one after another, on this terminal
+    python3 run_configs.py <folder> --logs DIR         unattended: --skip-review, output to DIR/<config>.log
+    python3 run_configs.py <folder> --only "rotating*" --dry-run --stop-on-error
 """
 
 from __future__ import annotations

@@ -1,0 +1,121 @@
+version = 1
+
+[[annotations]]
+path = "README.md"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+[[annotations]]
+path = "docs/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+[[annotations]]
+path = "**/*.py"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "**/Snakefile*"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "**/Dockerfile"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "**/*.sh"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ".github/workflows/*"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "REUSE.toml"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "CITATION.cff"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "codemeta.json"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "CHANGELOG.md"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/*.json"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/*.yml"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ".gitignore"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/.gitignore"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/.dockerignore"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "requirements.txt"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/*.toml"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "benchmark/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ".pre-commit-config.yaml"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"

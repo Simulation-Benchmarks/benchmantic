@@ -37,3 +37,13 @@ container: registry.example.org/my-benchmark:1.0   # the container image it runs
 # wrong (it may be partial -- the LLM fills in the rest), or `llm` to have
 # the LLM write a new one:
 # software_description: my-software.yaml
+
+# The benchmark repository create_benchmark_repo.py writes from the outputs
+# (like Simulation-Benchmarks/rotating-cylinders); see README.md:
+# repository:
+#   name: my-benchmark                 # e.g. the benchmark's title in its source list
+#   title: My Benchmark
+#   summary: A benchmark for ...
+#   documentation: documentation.md
+#   container: container               # the Dockerfile's folder; its CI builds the container
+#   authors: ["Given Family; 0000-0000-0000-0000; University"]

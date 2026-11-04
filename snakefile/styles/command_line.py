@@ -141,9 +141,12 @@ def render_mapped(adapter, mapping: dict[str, Any], executable_name: str, build_
 # the benchmark's software-neutral parameters are read from parameters.json
 # and each {adapter.name} input is computed from them (see *_mapping.json).
 import json
+import os
 from pathlib import Path
 
 container_image = {args.container_image!r}
+# BENCHMARK_CONTAINER (e.g. a .sif built in CI) overrides the published image
+container_uri = os.environ.get("BENCHMARK_CONTAINER") or f"docker://{{container_image}}"
 container_shared_dir = {args.container_shared_dir!r}
 executable = {executable_name!r}
 build_dir = {build_directory!r}
@@ -171,7 +174,7 @@ rule run_simulation:
     resources:
         serial_run=1
     singularity:
-        f"docker://{{container_image}}"
+        container_uri
     run:
         shell(
             f"""
@@ -229,12 +232,15 @@ def render_flags(adapter, flag_keys: list[str], executable_name: str, build_dire
 
     return f'''\
 import json
+import os
 from pathlib import Path
 
 # Use workflow.basedir to find the root relative to the Snakefile
 shared_dir = Path(workflow.basedir).parent
 
 container_image = {args.container_image!r}
+# BENCHMARK_CONTAINER (e.g. a .sif built in CI) overrides the published image
+container_uri = os.environ.get("BENCHMARK_CONTAINER") or f"docker://{{container_image}}"
 container_shared_dir = {args.container_shared_dir!r}
 executable = {executable_name!r}
 build_dir = {build_directory!r}
@@ -262,7 +268,7 @@ rule run_simulation:
     resources:
         serial_run=1
     singularity:
-        f"docker://{{container_image}}"
+        container_uri
     run:
 {assignments}
 

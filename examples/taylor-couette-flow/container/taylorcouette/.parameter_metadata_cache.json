@@ -1,0 +1,93 @@
+[
+  {
+    "semantic_name": "cylinder_radii",
+    "ini": [
+      "Grid",
+      "Radial0"
+    ],
+    "index": 0,
+    "datatype": "schema:Float",
+    "unit": "unit:M",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Length",
+    "confidence": 0.93,
+    "explanation": "Radial grid coordinates read as vector 'radii'; first is inner cylinder radius R1 (1.0), last is outer radius R2 (2.0). Metres. Index 0 refers to the first token (inner radius); the second token is the outer radius."
+  },
+  {
+    "semantic_name": "cells_radial",
+    "ini": [
+      "Grid",
+      "Cells0"
+    ],
+    "index": 0,
+    "datatype": "schema:Integer",
+    "unit": "unit:UNITLESS",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Count",
+    "confidence": 0.95,
+    "explanation": "Number of grid cells in the radial direction (dimension 0) of the structured radial grid."
+  },
+  {
+    "semantic_name": "cells_angular",
+    "ini": [
+      "Grid",
+      "Cells1"
+    ],
+    "index": 0,
+    "datatype": "schema:Integer",
+    "unit": "unit:UNITLESS",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Count",
+    "confidence": 0.93,
+    "explanation": "Number of grid cells in the angular (circumferential) direction (dimension 1) of the radial grid."
+  },
+  {
+    "semantic_name": "grid_refinement_level",
+    "ini": [
+      "Grid",
+      "Refinement"
+    ],
+    "index": 0,
+    "datatype": "schema:Integer",
+    "unit": "unit:UNITLESS",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/Count",
+    "confidence": 0.95,
+    "explanation": "Number of global refinement steps passed to globalRefine(); integer count."
+  },
+  {
+    "semantic_name": "inner_cylinder_angular_velocity",
+    "ini": [
+      "Problem",
+      "Omega1"
+    ],
+    "index": 0,
+    "datatype": "schema:Float",
+    "unit": "unit:RAD-PER-SEC",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/AngularVelocity",
+    "confidence": 0.96,
+    "explanation": "Angular velocity Omega_1 of the inner cylinder, used in the Couette solution coefficients A and B."
+  },
+  {
+    "semantic_name": "outer_cylinder_angular_velocity",
+    "ini": [
+      "Problem",
+      "Omega2"
+    ],
+    "index": 0,
+    "datatype": "schema:Float",
+    "unit": "unit:RAD-PER-SEC",
+    "quantityKind": "http://qudt.org/vocab/quantitykind/AngularVelocity",
+    "confidence": 0.96,
+    "explanation": "Angular velocity Omega_2 of the outer cylinder (0 means stationary), used in the Couette solution coefficients A and B."
+  },
+  {
+    "semantic_name": "simulation_name",
+    "ini": [
+      "Problem",
+      "Name"
+    ],
+    "index": 0,
+    "datatype": "schema:String",
+    "unit": "unit:UNITLESS",
+    "quantityKind": null,
+    "confidence": 0.9,
+    "explanation": "Problem name used as a prefix for output files; encodes the grid resolution (16x128). A label with no physical dimension."
+  }
+]

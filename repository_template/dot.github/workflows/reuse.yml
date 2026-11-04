@@ -1,0 +1,45 @@
+name: REUSE compliance
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  reuse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install REUSE tool
+        run: pip install reuse
+
+      - name: Run REUSE lint
+        run: reuse lint
+
+      - name: Generate REUSE lint JSON report
+        run: reuse lint --json > reuse-lint-report.json
+        if: always()
+
+      - name: Generate SPDX bill of materials
+        run: reuse spdx > project.spdx
+        if: always()
+
+      - name: Upload REUSE reports as artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reuse-reports
+          path: |
+            reuse-lint-report.json
+            project.spdx
+          if-no-files-found: error
+          retention-days: 30

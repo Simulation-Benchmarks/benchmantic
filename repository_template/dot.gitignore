@@ -1,0 +1,15 @@
+# macOS system files
+.DS_Store
+# Snakemake hidden folders
+.snakefile/
+.snakemake/
+# Sentinel / temporary files
+*.done
+.simulation_done
+# Benchmark results
+results/
+# generated per run by run_benchmark.py from the benchmark file
+@@SOFTWARE_DIR@@/parameters_*.json
+# Python cache
+__pycache__/
+*.pyc

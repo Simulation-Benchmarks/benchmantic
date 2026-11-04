@@ -114,10 +114,13 @@ rule compute_metrics:
 # written into the case's dictionaries (see *_mapping.json). Run it in a
 # folder that holds the {name} case, as run_benchmark.py prepares it.
 import json
+import os
 from pathlib import Path
 
 snakefile_dir = Path(workflow.snakefile).resolve().parent
 container_image = {args.container_image!r}
+# BENCHMARK_CONTAINER (e.g. a .sif built in CI) overrides the published image
+container_uri = os.environ.get("BENCHMARK_CONTAINER") or f"docker://{{container_image}}"
 
 with open("parameters.json") as f:
     config = json.load(f)
@@ -138,7 +141,7 @@ rule run_simulation:
     resources:
         serial_run=1
     container:
-        f"docker://{{container_image}}"
+        container_uri
     run:
         shell(
             f"""

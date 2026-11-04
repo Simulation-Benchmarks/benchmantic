@@ -43,10 +43,3 @@ def add_arguments(parser) -> None:
         style.add_arguments(parser.add_argument_group(f"Snakefile options ({name} style)"))
 
 
-def argument_dests() -> list[str]:
-    """Namespace attributes of the styles' options."""
-    import argparse
-
-    parser = argparse.ArgumentParser(add_help=False)
-    add_arguments(parser)
-    return [action.dest for action in parser._actions]  # noqa: SLF001 -- no public accessor

@@ -1,0 +1,118 @@
+name: @@SOFTWARE_NAME@@ CI
+
+on:
+  push:
+    branches: [ main ]
+
+  pull_request:
+    branches: [ main ]
+
+  workflow_dispatch:
+
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Git ref to checkout for the benchmark run
+        required: false
+        type: string
+      benchmark_file:
+        description: Path to the semantic benchmark JSON-LD file
+        required: false
+        type: string
+        default: @@BENCHMARK_FILE@@
+
+env:
+  BENCHMARK_NAME: @@REPO_NAME@@
+  BENCHMARK_VERSION: @@BENCHMARK_VERSION@@
+  EXAMPLE_BENCHMARK_FILE: ${{ inputs.benchmark_file || '@@BENCHMARK_FILE@@' }}
+  BRANCH_NAME: ${{ inputs.checkout_ref || github.head_ref || github.ref_name }}
+  SOFTWARE_NAME: @@SOFTWARE_DIR@@
+  ROCRATE_LICENSE: https://opensource.org/licenses/MIT
+  ROCRATE_NAME: @@REPO_NAME@@ provenance (@@SOFTWARE_NAME@@)
+  ROCRATE_DESCRIPTION_BASE: Provenance run of the @@REPO_NAME@@ benchmark using @@SOFTWARE_NAME@@
+
+jobs:
+  run-examples:
+    name: @@SOFTWARE_NAME@@
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo content
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+
+      - name: Setup Mambaforge
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          miniforge-version: latest
+          activate-environment: @@ENV_NAME@@
+          use-mamba: true
+          conda-remove-defaults: "true"
+
+      - name: Set strict channel priority
+        shell: bash -l {0}
+        run: conda config --set channel_priority strict
+
+      - name: Update benchmark environment
+        shell: bash -l {0}
+        run: mamba env update -n @@ENV_NAME@@ -f environment_benchmarks.yml
+
+      - name: Install provenance Python packages
+        shell: bash -l {0}
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Verify benchmark resources
+        shell: bash -l {0}
+        run: test -f "${GITHUB_WORKSPACE}/${EXAMPLE_BENCHMARK_FILE}"
+
+      - name: Setup Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.4.5
+
+      - name: Build the ${{ env.SOFTWARE_NAME }} container
+        run: |
+          docker build -t "@@LOCAL_IMAGE@@" "@@SOFTWARE_DIR@@/container"
+          docker save -o "${RUNNER_TEMP}/image.tar" "@@LOCAL_IMAGE@@"
+          apptainer build "${RUNNER_TEMP}/@@SOFTWARE_DIR@@.sif" "docker-archive://${RUNNER_TEMP}/image.tar"
+          rm "${RUNNER_TEMP}/image.tar"
+          echo "BENCHMARK_CONTAINER=${RUNNER_TEMP}/@@SOFTWARE_DIR@@.sif" >> "$GITHUB_ENV"
+      - name: Run ${{ env.BENCHMARK_NAME }} using ${{ env.SOFTWARE_NAME }}
+        shell: bash -l {0}
+        run: |
+          ROCRATE_DESCRIPTION="${ROCRATE_DESCRIPTION_BASE}, Version ${BENCHMARK_VERSION}, Branch ${BRANCH_NAME}"
+
+          cd "$GITHUB_WORKSPACE/${SOFTWARE_NAME}/"
+          python run_benchmark.py \
+            --benchmark-file "${GITHUB_WORKSPACE}/${EXAMPLE_BENCHMARK_FILE}" \
+            --rocrate-name "${SOFTWARE_NAME}_rocrate.zip" \
+            --result-path "${GITHUB_WORKSPACE}/${SOFTWARE_NAME}/results" \
+            --crate-license "${ROCRATE_LICENSE}" \
+            --crate-name "${ROCRATE_NAME}" \
+            --crate-description "${ROCRATE_DESCRIPTION}"
+
+      - name: Check metrics of every configuration
+        shell: bash -l {0}
+        run: |
+          python scripts/check_metrics.py \
+            --benchmark-file "${GITHUB_WORKSPACE}/${EXAMPLE_BENCHMARK_FILE}" \
+            --results "${GITHUB_WORKSPACE}/${SOFTWARE_NAME}/results" \
+            --software "@@SOFTWARE_NAME@@" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive results of the ${{ env.SOFTWARE_NAME }} run of ${{ env.BENCHMARK_NAME }}
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SOFTWARE_NAME }}_results_${{ env.BENCHMARK_NAME }}
+          path: |
+            ${{ env.SOFTWARE_NAME }}/results/
+            !${{ env.SOFTWARE_NAME }}/results/${{ env.SOFTWARE_NAME }}_rocrate.zip
+
+      - name: Archive ${{ env.SOFTWARE_NAME }} aggregate RO-Crate artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SOFTWARE_NAME }}-aggregate-rocrate
+          path: ${{ github.workspace }}/${{ env.SOFTWARE_NAME }}/results/${{ env.SOFTWARE_NAME }}_rocrate.zip

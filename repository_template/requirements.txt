@@ -1,0 +1,3 @@
+pandas
+matplotlib
+semantic-benchmark~=0.4.2
