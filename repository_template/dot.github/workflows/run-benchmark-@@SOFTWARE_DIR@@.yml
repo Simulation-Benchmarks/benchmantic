@@ -22,6 +22,8 @@ on:
         default: @@BENCHMARK_FILE@@
 
 env:
+  ROCRATE_AGENT_NAME: @@AGENT_NAME@@
+  ROCRATE_AGENT_ORCID: @@AGENT_ORCID@@
   BENCHMARK_NAME: @@REPO_NAME@@
   BENCHMARK_VERSION: @@BENCHMARK_VERSION@@
   EXAMPLE_BENCHMARK_FILE: ${{ inputs.benchmark_file || '@@BENCHMARK_FILE@@' }}
@@ -91,7 +93,10 @@ jobs:
             --result-path "${GITHUB_WORKSPACE}/${SOFTWARE_NAME}/results" \
             --crate-license "${ROCRATE_LICENSE}" \
             --crate-name "${ROCRATE_NAME}" \
-            --crate-description "${ROCRATE_DESCRIPTION}"
+            --crate-description "${ROCRATE_DESCRIPTION}" \
+            --workflow-path "${GITHUB_WORKSPACE}/.github/workflows/run-benchmark-${SOFTWARE_NAME}.yml" \
+            --agent-name "${ROCRATE_AGENT_NAME}" \
+            --agent-orcid "${ROCRATE_AGENT_ORCID}"
 
       - name: Check metrics of every configuration
         shell: bash -l {0}

@@ -75,6 +75,14 @@ def parse_arguments() -> Namespace:
         default=DEFAULT_CRATE_DESCRIPTION,
         help="Description recorded in the generated aggregate RO-Crate.",
     )
+    parser.add_argument(
+        "--workflow-path",
+        type=Path,
+        required=True,
+        help="The GitHub Actions workflow file: the aggregate RO-Crate's main entity.",
+    )
+    parser.add_argument("--agent-name", required=True, help="Who ran the workflow (RO-Crate author and creator).")
+    parser.add_argument("--agent-orcid", required=True, help="Their ORCID URL.")
     return parser.parse_args()
 
 
@@ -159,8 +167,10 @@ def run_benchmark(args: Namespace) -> None:
         crate_license=args.crate_license,
         crate_name=args.crate_name,
         crate_description=args.crate_description,
-        validation_dir=args.result_path / "unpacked_rocrate",
         subcrate_paths=subcrate_paths,
+        workflow_path=args.workflow_path,
+        agent_name=args.agent_name,
+        agent_orcid=args.agent_orcid,
     )
     LOGGER.info("Aggregate RO-Crate created at %s.", rocrate_path)
 

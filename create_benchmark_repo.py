@@ -182,6 +182,11 @@ def build(outputs: Path, out: Path, settings: dict, org: str, config_dir: Path) 
     software_dir = re.sub(r"[^0-9a-z]+", "-", desc["software"].lower()).strip("-")
     summary = " ".join((settings.get("summary") or desc["description"].split("\n\n")[0]).split())
     benchmark_rel = f"benchmark/{desc['version']}/minimal-configurations.json"
+    authors = [parse_author(a) for a in settings.get("authors", [])]
+    if not authors or not authors[0]["orcid"]:
+        sys.exit("Error: `repository: authors:` needs a first author with an ORCID "
+                 "('Given Family; 0000-0000-0000-0000; affiliation'): the RO-Crate of every run names them.")
+    agent = authors[0]
     values = dict(
         TITLE=settings.get("title") or f"{desc['label'].title()} Benchmark", SUMMARY=summary,
         SUMMARY_ONE_LINE=summary.replace('"', "'"), DESCRIPTION=desc["description"] or summary,
@@ -192,6 +197,7 @@ def build(outputs: Path, out: Path, settings: dict, org: str, config_dir: Path) 
         BENCHMARK_VERSION=desc["version"], ENV_NAME=f"{name}-model-validation",
         LOCAL_IMAGE=f"local/{name}-{software_dir}:ci", N_CONFIGURATIONS=len(desc["configurations"]),
         UNIT_SYMBOLS=json.dumps({re.split(r"[:/#]", u)[-1]: s for u, s in DEFAULT_UNIT_SYMBOLS.items()}),
+        AGENT_NAME=f"{agent['given']} {agent['family']}", AGENT_ORCID=agent["orcid"],
         EXTRA_LICENSES="", **tables(desc))
 
     if out.exists():
@@ -232,7 +238,6 @@ def build(outputs: Path, out: Path, settings: dict, org: str, config_dir: Path) 
         doc["@context"]["local"] = values["URL"] + "/"
     (out / benchmark_rel).parent.mkdir(parents=True, exist_ok=True)
     (out / benchmark_rel).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    authors = [parse_author(a) for a in settings.get("authors", [])]
     keywords = settings.get("keywords") or ["benchmark", desc["label"]]
     (out / "CITATION.cff").write_text(citation(values, authors, keywords), encoding="utf-8")
     (out / "codemeta.json").write_text(codemeta(values, authors, keywords), encoding="utf-8")
