@@ -204,19 +204,23 @@ repository:
 ```
 
 ```bash
-python3 create_benchmark_repo.py --config my-benchmark.yaml --org Sarbani-Roy --github --watch
+python3 create_benchmark_repo.py --config my-benchmark.yaml --org Sarbani-Roy --github --rohub --watch
 ```
 
 The repository also gets rotating-cylinders' RoHub integration: a workflow that
 runs the benchmark every Friday and uploads each run to [RoHub](https://rohub.org),
 and a notebook (`notebooks/RoCrate.ipynb`, on Binder) that fetches the runs from
 RoHub and plots every metric. The weekly run uploads to the development RoHub,
-a manual run to development by default (`rohub_production: true`: production). It
-is active once the benchmark's research object on RoHub is known --
-`rohub_identifier:` in the `repository:` block, or the repository variable
-`ROHUB_BENCHMARK_IDENTIFIER` -- and needs the development RoHub login as the
-secrets `ROHUB_DEV_USERNAME` and `ROHUB_DEV_PASSWORD` (for production also
-`ROHUB_PROD_USERNAME` and `ROHUB_PROD_PASSWORD`).
+a manual run to development by default (`rohub_production: true`: production).
+`--rohub` sets this up: with the RoHub login in the environment
+(`ROHUB_DEV_USERNAME`, `ROHUB_DEV_PASSWORD`; for production also
+`ROHUB_PROD_USERNAME`, `ROHUB_PROD_PASSWORD`) it finds the benchmark's research
+object -- the one of that login titled like the repository -- or creates it with
+the benchmark description, stores the login and the object's identifier in the new
+repository (secrets `ROHUB_DEV_*`, variable `ROHUB_DEV_BENCHMARK_IDENTIFIER`, and the
+same with `PROD`), and starts its RoHub Integration CI. To use an existing research
+object instead, give its UUID as `rohub_dev_identifier:` (`rohub_prod_identifier:`)
+in the `repository:` block.
 
 `--github` creates the repository with the GitHub CLI (`gh`) and pushes it --
 or adds a commit to it, if it exists; `--watch` waits for its Actions and fails
@@ -234,7 +238,10 @@ a personal access token of the target account (classic: scopes `repo` and
 `workflow` -- the built-in token cannot create repositories), and
 `LLM_API_KEY` (provider: the repository variable `LLM_PROVIDER`, default
 `groq`). Its input *ask_llm* asks the LLM again for everything; otherwise only
-for what has no stored answer -- everything, for a new benchmark.
+for what has no stored answer -- everything, for a new benchmark. With *rohub*
+ticked (the default) it also sets up RoHub, from the secrets `ROHUB_DEV_USERNAME`
+and `ROHUB_DEV_PASSWORD` (and `ROHUB_PROD_*` for production), and waits for the
+new repository's RoHub Integration CI as well.
 
 Locally: `pip install -r requirements.txt pytest numpy httpx reuse`, then
 `python -m pytest` and `reuse lint`.

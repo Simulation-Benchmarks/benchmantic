@@ -2,11 +2,11 @@ name: RoHub Integration CI
 
 # Runs the benchmark and uploads its aggregate RO-Crate to RoHub: every Friday to
 # the development RoHub, and on demand to the one the tick box chooses.
-# Needs the RoHub identifier of the benchmark's research object -- the repository
-# variable ROHUB_BENCHMARK_IDENTIFIER, else the one this repository was generated
-# with -- and the RoHub logins as the secrets ROHUB_DEV_USERNAME, ROHUB_DEV_PASSWORD
-# and ROHUB_PROD_USERNAME, ROHUB_PROD_PASSWORD. Without an identifier, the RoHub
-# steps are skipped.
+# Needs, for that RoHub, the identifier of the benchmark's research object -- the
+# repository variable ROHUB_DEV_BENCHMARK_IDENTIFIER or ROHUB_PROD_BENCHMARK_IDENTIFIER
+# -- and the login as the secrets ROHUB_DEV_USERNAME, ROHUB_DEV_PASSWORD or
+# ROHUB_PROD_USERNAME, ROHUB_PROD_PASSWORD. benchmantic sets them up (--rohub);
+# without an identifier, the RoHub steps are skipped.
 
 on:
   schedule:
@@ -33,7 +33,6 @@ permissions:
   contents: read
 
 env:
-  BENCHMARK_ROHUB_IDENTIFIER: ${{ vars.ROHUB_BENCHMARK_IDENTIFIER || '@@ROHUB_IDENTIFIER@@' }}
   # the weekly run uses the development RoHub; a manual run, the tick box
   USE_PRODUCTION_ROHUB: ${{ github.event_name != 'schedule' && inputs.use_production_rohub == true }}
 
@@ -42,25 +41,36 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
-      identifier: ${{ env.BENCHMARK_ROHUB_IDENTIFIER }}
+      identifier: ${{ steps.check.outputs.identifier }}
       production: ${{ env.USE_PRODUCTION_ROHUB }}
     steps:
       - name: Check the RoHub identifier
         id: check
+        env:
+          DEV_IDENTIFIER: ${{ vars.ROHUB_DEV_BENCHMARK_IDENTIFIER }}
+          PROD_IDENTIFIER: ${{ vars.ROHUB_PROD_BENCHMARK_IDENTIFIER }}
         run: |
-          if [ -n "${BENCHMARK_ROHUB_IDENTIFIER}" ]; then
+          if [ "${USE_PRODUCTION_ROHUB}" = "true" ]; then
+            kind=PROD; identifier="${PROD_IDENTIFIER}"
+          else
+            kind=DEV; identifier="${DEV_IDENTIFIER}"
+          fi
+          if [ -n "${identifier}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "Benchmark research object: ${BENCHMARK_ROHUB_IDENTIFIER} (production RoHub: ${USE_PRODUCTION_ROHUB})"
+            echo "identifier=${identifier}" >> "$GITHUB_OUTPUT"
+            echo "Benchmark research object: ${identifier} (production RoHub: ${USE_PRODUCTION_ROHUB})"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::RoHub is not set up yet: set the repository variable ROHUB_BENCHMARK_IDENTIFIER to the UUID of the benchmark's research object on RoHub."
-            echo "### RoHub skipped: no ROHUB_BENCHMARK_IDENTIFIER yet" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::RoHub is not set up yet: set the repository variable ROHUB_${kind}_BENCHMARK_IDENTIFIER to the UUID of the benchmark's research object on RoHub."
+            echo "### RoHub skipped: no ROHUB_${kind}_BENCHMARK_IDENTIFIER yet" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   prepare-benchmark:
     needs: setup
     if: needs.setup.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    env:
+      BENCHMARK_ROHUB_IDENTIFIER: ${{ needs.setup.outputs.identifier }}
     steps:
       - name: Checkout repo content
         if: inputs.download_from_rohub

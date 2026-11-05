@@ -52,12 +52,13 @@ The [RoHub Integration CI](.github/workflows/rohub-integration.yml) runs the
 benchmark and uploads each run's aggregate RO-Crate to [RoHub](https://rohub.org),
 annotated as investigating the benchmark's research object: every Friday to the
 development RoHub, and on demand (Actions -> RoHub Integration CI -> Run workflow)
-to production if *Upload to production RoHub* is ticked, else development. It needs
-that research object's identifier -- the repository variable
-`ROHUB_BENCHMARK_IDENTIFIER` (Settings -> Secrets and variables -> Actions ->
-Variables) -- and the RoHub logins as the secrets `ROHUB_DEV_USERNAME`,
-`ROHUB_DEV_PASSWORD` and `ROHUB_PROD_USERNAME`, `ROHUB_PROD_PASSWORD`. Without an
-identifier it skips the RoHub steps. A manual run can download the benchmark's
+to production if *Upload to production RoHub* is ticked, else development. For
+each RoHub it needs the research object's identifier -- the repository variable
+`ROHUB_DEV_BENCHMARK_IDENTIFIER` or `ROHUB_PROD_BENCHMARK_IDENTIFIER` (Settings ->
+Secrets and variables -> Actions -> Variables) -- and the login as the secrets
+`ROHUB_DEV_USERNAME`, `ROHUB_DEV_PASSWORD` or `ROHUB_PROD_USERNAME`,
+`ROHUB_PROD_PASSWORD`; benchmantic sets these up when it creates the repository.
+Without an identifier it skips the RoHub steps. A manual run can download the benchmark's
 resources from RoHub instead of using `@@BENCHMARK_FILE@@`.
 
 ## Interactive evaluation

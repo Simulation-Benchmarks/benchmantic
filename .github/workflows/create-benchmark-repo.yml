@@ -11,6 +11,10 @@
 #                         repo + workflow); GITHUB_TOKEN cannot create repositories
 #   LLM_API_KEY           API key of the LLM (the repository variable LLM_PROVIDER, default
 #                         groq); needed when the LLM is asked
+#   ROHUB_DEV_USERNAME,   login on the development RoHub (https://rohub2020-devel.apps.bst2.paas.psnc.pl);
+#   ROHUB_DEV_PASSWORD    with "rohub" ticked, copied into the new repository, which uploads its runs there
+#   ROHUB_PROD_USERNAME,  optional: login on rohub.org, for a benchmark with rohub_production: true
+#   ROHUB_PROD_PASSWORD
 name: Create benchmark repository
 
 on:
@@ -26,6 +30,10 @@ on:
         description: Ask the LLM again for every parameter and metric (else only for those without stored answers)
         type: boolean
         default: false
+      rohub:
+        description: Set up RoHub (research object, logins) and run the new repository's RoHub Integration CI
+        type: boolean
+        default: true
 
 jobs:
   create:
@@ -38,6 +46,11 @@ jobs:
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'groq' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       GH_TOKEN: ${{ secrets.BENCHMARK_REPO_TOKEN }}
+      ROHUB: ${{ inputs.rohub }}
+      ROHUB_DEV_USERNAME: ${{ secrets.ROHUB_DEV_USERNAME }}
+      ROHUB_DEV_PASSWORD: ${{ secrets.ROHUB_DEV_PASSWORD }}
+      ROHUB_PROD_USERNAME: ${{ secrets.ROHUB_PROD_USERNAME }}
+      ROHUB_PROD_PASSWORD: ${{ secrets.ROHUB_PROD_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,6 +66,9 @@ jobs:
           ACTOR_ID: ${{ github.actor_id }}
         run: |
           if [ -z "$GH_TOKEN" ]; then echo "::error::Add the repository secret BENCHMARK_REPO_TOKEN."; exit 1; fi
+          if [ "$ROHUB" = "true" ] && { [ -z "$ROHUB_DEV_USERNAME" ] || [ -z "$ROHUB_DEV_PASSWORD" ]; }; then
+            echo "::error::Add the repository secrets ROHUB_DEV_USERNAME and ROHUB_DEV_PASSWORD (your development RoHub login), or untick rohub."; exit 1
+          fi
           gh auth setup-git
           git config --global user.name "$ACTOR"
           git config --global user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
@@ -65,7 +81,10 @@ jobs:
           { echo "### What benchmantic found"; cat outputs/*/review.md; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create the repository and wait for its GitHub Actions
-        run: python create_benchmark_repo.py --config "$CONFIG" --org "$OWNER" --github --watch
+        run: |
+          args=(--config "$CONFIG" --org "$OWNER" --github --watch)
+          if [ "$ROHUB" = "true" ]; then args+=(--rohub); fi
+          python create_benchmark_repo.py "${args[@]}"
 
       - name: Upload the description and the repository
         if: always()

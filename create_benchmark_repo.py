@@ -20,6 +20,13 @@ the benchmark description (outputs/<software-name>/*_benchmark.jsonld) and the
 folder, CITATION.cff, codemeta.json and the license texts. --github needs the
 GitHub CLI (gh) signed in with a token that may create repositories in --org
 and push workflow files (classic token: scopes repo + workflow).
+
+--rohub (with --github) also sets up RoHub: it finds or creates the benchmark's
+research object on the development RoHub (and on production with
+`rohub_production: true` or a production login), stores the RoHub logins and
+the research objects' identifiers in the new repository, and starts its RoHub
+Integration CI. The logins come from the environment: ROHUB_DEV_USERNAME,
+ROHUB_DEV_PASSWORD (and ROHUB_PROD_USERNAME, ROHUB_PROD_PASSWORD).
 """
 
 from __future__ import annotations
@@ -177,8 +184,9 @@ def codemeta(values: dict, authors: list[dict], keywords: list[str]) -> str:
     }, indent=2) + "\n"
 
 
-def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def run(cmd: list[str], cwd: Path | None = None, check: bool = True,
+        stdin: str | None = None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, input=stdin)
     if check and proc.returncode:
         sys.exit(f"Error: {' '.join(cmd[:3])} ... failed:\n{(proc.stderr or proc.stdout).strip()}")
     return proc
@@ -214,7 +222,7 @@ def build(outputs: Path, out: Path, settings: dict, org: str, config_dir: Path) 
         LOCAL_IMAGE=f"local/{name}-{software_dir}:ci", N_CONFIGURATIONS=len(desc["configurations"]),
         UNIT_SYMBOLS=json.dumps({re.split(r"[:/#]", u)[-1]: s for u, s in DEFAULT_UNIT_SYMBOLS.items()}),
         AGENT_NAME=f"{agent['given']} {agent['family']}", AGENT_ORCID=agent["orcid"],
-        ROHUB_IDENTIFIER=str(settings.get("rohub_identifier") or ""), **rohub_settings(desc, settings),
+        **rohub_settings(desc, settings),
         EXTRA_LICENSES="", **tables(desc))
 
     if out.exists():
@@ -302,15 +310,23 @@ def publish(out: Path, full: str, description: str) -> bool:
     return True
 
 
-def watch(out: Path, full: str, timeout: float = 7200, poll: float = 30) -> bool:
-    """Wait for the Actions runs of the pushed commit; True if all succeeded."""
+def watch(out: Path, full: str, expect: tuple[str, ...] = (), since: str = "",
+          timeout: float = 7200, poll: float = 30) -> bool:
+    """Wait for the Actions runs of the pushed commit (the latest of each workflow,
+    and for the workflows in `expect` one started at or after `since`); True if
+    all succeeded."""
     sha = run(["git", "-C", str(out), "rev-parse", "HEAD"]).stdout.strip()
     deadline = time.monotonic() + timeout
     while True:
         rows = json.loads(run(["gh", "run", "list", "--repo", full, "--limit", "50", "--json",
-                               "workflowName,status,conclusion,url,headSha"]).stdout or "[]")
-        runs = [r for r in rows if r["headSha"] == sha]
-        if runs and all(r["status"] == "completed" for r in runs):
+                               "workflowName,status,conclusion,url,headSha,createdAt"]).stdout or "[]")
+        latest: dict[str, dict] = {}
+        for r in rows:  # newest first
+            if r["headSha"] == sha:
+                latest.setdefault(r["workflowName"], r)
+        runs = list(latest.values())
+        started = all(e in latest and latest[e]["createdAt"] >= since for e in expect)
+        if runs and started and all(r["status"] == "completed" for r in runs):
             break
         if time.monotonic() > deadline:
             sys.exit(f"Error: the Actions runs of {full} did not finish within {timeout:.0f} s.")
@@ -325,6 +341,77 @@ def watch(out: Path, full: str, timeout: float = 7200, poll: float = 30) -> bool
     return all(r["conclusion"] == "success" for r in runs)
 
 
+# --- RoHub ------------------------------------------------------------------------------------
+
+def research_object(name: str, description: str, url: str, jsonld: Path, production: bool,
+                    login: tuple[str, str], area: str | None = None) -> str:
+    """The UUID of the research object titled `name` of this RoHub login; created,
+    with the benchmark description and the repository's URL, if there is none."""
+    try:
+        import rohub
+        from semantic_benchmark.rohub import login_to_rohub
+    except ImportError:
+        sys.exit("Error: --rohub needs semantic-benchmark: pip install -r requirements.txt")
+    where = "production" if production else "development"
+    try:
+        login_to_rohub(*login, use_production_rohub=production)
+        mine = rohub.list_my_ros()
+        if not mine.empty and (mine["title"] == name).any():
+            return str(mine[mine["title"] == name].iloc[0]["identifier"])
+        areas = rohub.list_valid_research_areas() or []
+        area = area or next((a for a in areas if "engineering" in a.lower()), areas[0] if areas else "Engineering")
+        ro = rohub.ros_create(title=name, research_areas=[area], description=description[:2000])
+        ro.add_annotations(body_specification_json=[{"property": "https://schema.org/codeRepository", "value": url}])
+        types = rohub.list_valid_resource_types() or []
+        if "Annotation Collection" in types:  # what download-semantic-benchmark looks for
+            ro.add_internal_resource(res_type="Annotation Collection", file_path=str(jsonld),
+                                     title="benchmark.json", description="Semantic description of the benchmark")
+        else:
+            print(f"  ! the {where} RoHub has no resource type 'Annotation Collection': the benchmark "
+                  "description was not added, so 'Download benchmark resources from RoHub' will not work")
+        return str(ro.identifier)
+    except SystemExit as e:  # the rohub client exits on errors
+        sys.exit(f"Error: {where} RoHub: {e}")
+
+
+def setup_rohub(full: str, url: str, out: Path, settings: dict) -> list[str]:
+    """Find or create the research objects, store the logins and identifiers in
+    `full`; returns the RoHub instances set up."""
+    production = bool(settings.get("rohub_production", False))
+    jsonld = next((out / "benchmark").glob("*/minimal-configurations.json"))
+    done = []
+    for kind in ["DEV"] + ["PROD"] * (production or bool(os.environ.get("ROHUB_PROD_USERNAME"))):
+        login = os.environ.get(f"ROHUB_{kind}_USERNAME", ""), os.environ.get(f"ROHUB_{kind}_PASSWORD", "")
+        if not all(login):
+            sys.exit(f"Error: --rohub needs the RoHub login in ROHUB_{kind}_USERNAME and ROHUB_{kind}_PASSWORD.")
+        variable = f"ROHUB_{kind}_BENCHMARK_IDENTIFIER"
+        known = run(["gh", "variable", "get", variable, "--repo", full], check=False)
+        uuid = (str(settings.get(f"rohub_{kind.lower()}_identifier") or "")
+                or (known.stdout.strip() if known.returncode == 0 else "")
+                or research_object(settings["name"], settings.get("summary") or settings["name"], url, jsonld,
+                                   kind == "PROD", login, settings.get("rohub_research_area")))
+        for secret, value in zip(("USERNAME", "PASSWORD"), login):
+            run(["gh", "secret", "set", f"ROHUB_{kind}_{secret}", "--repo", full], stdin=value)
+        run(["gh", "variable", "set", variable, "--repo", full, "--body", uuid])
+        where = "production" if kind == "PROD" else "development"
+        print(f"✓ RoHub ({where}): research object {uuid}")
+        summary(f"RoHub ({where}): research object `{uuid}`", "")
+        done.append(where)
+    return done
+
+
+def start_rohub_run(full: str) -> str:
+    """Start the new repository's RoHub Integration CI; returns when (UTC)."""
+    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for _ in range(18):  # GitHub needs a moment to see a newly pushed workflow
+        if run(["gh", "workflow", "run", "rohub-integration.yml", "--repo", full, "--ref", "main"],
+               check=False).returncode == 0:
+            print("✓ Started its RoHub Integration CI")
+            return since
+        time.sleep(10)
+    sys.exit(f"Error: could not start the RoHub Integration CI of {full}.")
+
+
 # --- command line ----------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
@@ -337,7 +424,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--org", default="Simulation-Benchmarks", help="GitHub account or organization (default: %(default)s).")
     ap.add_argument("--github", action="store_true", help="Create the repository on GitHub (or update it) and push.")
     ap.add_argument("--watch", action="store_true", help="With --github: wait for its Actions; fail unless all pass.")
+    ap.add_argument("--rohub", action="store_true",
+                    help="With --github: set up RoHub (see above) and start the repository's RoHub Integration CI.")
     args = ap.parse_args(argv)
+    if (args.watch or args.rohub) and not args.github:
+        ap.error("--watch and --rohub need --github")
 
     config = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
     settings = dict(config.get("repository") or {})
@@ -356,9 +447,13 @@ def main(argv: list[str] | None = None) -> int:
     pushed = publish(out, full, settings.get("summary") or settings["name"])
     print(f"✓ Pushed {url}" if pushed else f"✓ {url} already holds exactly these files")
     summary(f"### Benchmark repository: [{full}]({url})", "")
+    expect, since = (), ""
+    if args.rohub:
+        setup_rohub(full, url, out, settings)
+        since, expect = start_rohub_run(full), ("RoHub Integration CI",)
     if args.watch:
         print(f"  Waiting for its GitHub Actions: {url}/actions")
-        return 0 if watch(out, full) else 1
+        return 0 if watch(out, full, expect, since) else 1
     return 0
 
 
