@@ -119,3 +119,15 @@ path = ".pre-commit-config.yaml"
 precedence = "closest"
 SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "**/*.ipynb"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "postBuild"
+precedence = "closest"
+SPDX-FileCopyrightText = "@@YEAR@@ The @@REPO_NAME@@ authors"
+SPDX-License-Identifier = "MIT"

@@ -1,0 +1,13 @@
+name: provenance
+# Environment for uploading provenance RO-Crates to RoHub.
+
+channels:
+  - conda-forge
+
+channel_priority: strict
+
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - semantic-benchmark~=0.4.4

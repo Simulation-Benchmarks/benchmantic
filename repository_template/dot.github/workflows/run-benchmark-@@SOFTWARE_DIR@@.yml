@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: @@BENCHMARK_FILE@@
+      benchmark_artifact_name:
+        description: Optional artifact with the benchmark resources (downloaded from RoHub)
+        required: false
+        type: string
+        default: ''
 
 env:
   ROCRATE_AGENT_NAME: @@AGENT_NAME@@
@@ -65,6 +70,13 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
 
+      - name: Download benchmark resources artifact
+        if: inputs.benchmark_artifact_name != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.benchmark_artifact_name }}
+          path: downloaded-benchmark
+
       - name: Verify benchmark resources
         shell: bash -l {0}
         run: test -f "${GITHUB_WORKSPACE}/${EXAMPLE_BENCHMARK_FILE}"
@@ -81,6 +93,7 @@ jobs:
           apptainer build "${RUNNER_TEMP}/@@SOFTWARE_DIR@@.sif" "docker-archive://${RUNNER_TEMP}/image.tar"
           rm "${RUNNER_TEMP}/image.tar"
           echo "BENCHMARK_CONTAINER=${RUNNER_TEMP}/@@SOFTWARE_DIR@@.sif" >> "$GITHUB_ENV"
+
       - name: Run ${{ env.BENCHMARK_NAME }} using ${{ env.SOFTWARE_NAME }}
         shell: bash -l {0}
         run: |

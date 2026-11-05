@@ -41,3 +41,7 @@ repository:
   authors:
     - Sarbani Roy; 0000-0002-5990-0076; University of Stuttgart
   keywords: [benchmark, computational fluid dynamics, Taylor-Couette flow, rotating cylinders, NFDI4ING, model validation, FAIR4RS, REUSE]
+  # RoHub: the UUID of the benchmark's research object -- empty until it exists;
+  # the repository variable ROHUB_BENCHMARK_IDENTIFIER can also set it later
+  rohub_identifier: ""
+  rohub_production: false              # manual runs: the development RoHub (true: rohub.org); weekly runs: development

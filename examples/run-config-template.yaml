@@ -47,3 +47,6 @@ container: registry.example.org/my-benchmark:1.0   # the container image it runs
 #   documentation: documentation.md
 #   container: container               # the Dockerfile's folder; its CI builds the container
 #   authors: ["Given Family; 0000-0000-0000-0000; University"]
+#   rohub_identifier: ""               # UUID of the benchmark's research object on RoHub
+#   rohub_production: false            # manual runs: development RoHub (true: rohub.org); weekly: development
+#   plot_parameter: cells_radial       # the notebook's x-axis (default: the first that varies)

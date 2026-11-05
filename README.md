@@ -66,7 +66,7 @@ the LLM what they mean, and shows you its answers to review.
 ## The run config
 
 The same keys work for every simulation software
-([`run-config-template.yaml`](run-config-template.yaml) explains each one):
+([`examples/run-config-template.yaml`](examples/run-config-template.yaml) explains each one):
 
 | Key | Meaning |
 |---|---|
@@ -182,8 +182,6 @@ catalog's `run_benchmark.py` writes it) and runs the simulation in the
 container; set `BENCHMARK_CONTAINER` to a local `.sif` to use that instead of
 the published image.
 
-`run_configs.py` runs `workflow.py` for every run config in a folder.
-
 ## A benchmark repository
 
 `create_benchmark_repo.py` turns the outputs into a repository laid out like
@@ -208,6 +206,17 @@ repository:
 ```bash
 python3 create_benchmark_repo.py --config my-benchmark.yaml --org Sarbani-Roy --github --watch
 ```
+
+The repository also gets rotating-cylinders' RoHub integration: a workflow that
+runs the benchmark every Friday and uploads each run to [RoHub](https://rohub.org),
+and a notebook (`notebooks/RoCrate.ipynb`, on Binder) that fetches the runs from
+RoHub and plots every metric. The weekly run uploads to the development RoHub,
+a manual run to development by default (`rohub_production: true`: production). It
+is active once the benchmark's research object on RoHub is known --
+`rohub_identifier:` in the `repository:` block, or the repository variable
+`ROHUB_BENCHMARK_IDENTIFIER` -- and needs the development RoHub login as the
+secrets `ROHUB_DEV_USERNAME` and `ROHUB_DEV_PASSWORD` (for production also
+`ROHUB_PROD_USERNAME` and `ROHUB_PROD_PASSWORD`).
 
 `--github` creates the repository with the GitHub CLI (`gh`) and pushes it --
 or adds a commit to it, if it exists; `--watch` waits for its Actions and fails
@@ -238,7 +247,6 @@ describe_benchmark.py    describe: the description, dataset, mapping and Snakefi
 show_description.py      a description as Markdown tables (review.md)
 verify_description.py    checks a description against semantic-benchmark
 create_benchmark_repo.py a benchmark repository from the outputs
-run_configs.py           workflow.py for every run config in a folder
 config.py                run configs
 metadata/                reading the implementation, building the JSON-LD
 ai/                      the LLM: prompts, requests, checks, review, stored answers
@@ -246,7 +254,7 @@ software/                reading any software from its description
 software_descriptions/   DuMux, OpenFOAM, FEniCSx
 snakefile/               writing the Snakefile
 repository_template/     the files of a benchmark repository
-examples/                Taylor-Couette flow with DuMux
+examples/                Taylor-Couette flow with DuMux, and run-config-template.yaml
 tests/
 ```
 

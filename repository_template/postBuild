@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 The rotating-cylinders authors (https://github.com/Simulation-Benchmarks/rotating-cylinders)
+# SPDX-License-Identifier: MIT
+# Run by repo2docker after the environment is built (e.g. for Binder /
+# NFDI JupyterHub launches). Regenerates the combined notebook from the
+# current docs and source notebook so it is always up to date.
+set -euo pipefail
+
+python scripts/build_notebook.py \
+  --doc docs/benchmark-documentation.md \
+  --source-notebook notebooks/RoCrate.ipynb \
+  --notebook notebooks/benchmark-results.ipynb

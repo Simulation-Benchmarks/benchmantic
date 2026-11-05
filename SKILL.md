@@ -51,7 +51,7 @@ reads the config's `repository:` block (`name`, `title`, `summary`, `documentati
 `container` -- the Dockerfile's folder or a link to it -- `authors`, `keywords`) and
 fills in `repository_template/`. `--github` creates (or updates, with one new commit)
 `ACCOUNT/name` via `gh` -- the token needs the `repo` and `workflow` scopes;
-`--watch` waits for its Actions. The GitHub Actions workflow
+`--watch` waits for its Actions. The repository includes the RoHub workflow and notebook of rotating-cylinders; they activate with `rohub_identifier` (or the repository variable `ROHUB_BENCHMARK_IDENTIFIER`) plus the secrets `ROHUB_DEV_USERNAME`/`ROHUB_DEV_PASSWORD` (the weekly run uploads to the development RoHub) and, for manual runs, by default too; `rohub_production: true` makes manual runs use production and `ROHUB_PROD_USERNAME`/`ROHUB_PROD_PASSWORD`; there is no tool to create the benchmark's research object on RoHub, it is created once by hand. The GitHub Actions workflow
 `create-benchmark-repo.yml` does all of it (secrets `BENCHMARK_REPO_TOKEN`,
 `LLM_API_KEY`). Name repositories after the benchmark's title in its source list,
 e.g. `taylor-couette-flow` for "Taylor-Couette Flow" in the DuMux list.

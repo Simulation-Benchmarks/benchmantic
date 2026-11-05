@@ -13,3 +13,5 @@ results/
 # Python cache
 __pycache__/
 *.pyc
+# Auto-generated notebook (postBuild builds it, see README)
+notebooks/benchmark-results.ipynb

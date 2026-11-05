@@ -1,0 +1,86 @@
+name: Upload RO-Crate to RoHub
+
+on:
+  workflow_call:
+    inputs:
+      software:
+        required: true
+        type: string
+      display_name:
+        required: true
+        type: string
+      benchmark_rohub_identifier:
+        required: true
+        type: string
+      checkout_ref:
+        required: true
+        type: string
+      use_production_rohub:
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  BENCHMARK_NAME: @@REPO_NAME@@
+  CODE_REPOSITORY_URL: https://github.com/${{ github.repository }}/tree/${{ inputs.checkout_ref }}
+  USE_PRODUCTION_ROHUB: ${{ inputs.use_production_rohub }}
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo content
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Download ${{ inputs.display_name }} aggregate RO-Crate artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.software }}-aggregate-rocrate
+          path: artifacts/${{ inputs.software }}
+
+      - name: Setup Mambaforge with provenance env
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          miniforge-version: latest
+          activate-environment: provenance
+          use-mamba: true
+          environment-file: provenance/environment_provenance.yml
+          conda-remove-defaults: "true"
+
+      - name: Select RoHub credentials
+        shell: bash
+        run: |
+          if [ "${USE_PRODUCTION_ROHUB}" = "true" ]; then
+            echo "ROHUB_USERNAME=${{ secrets.ROHUB_PROD_USERNAME }}" >> "${GITHUB_ENV}"
+            echo "ROHUB_PASSWORD=${{ secrets.ROHUB_PROD_PASSWORD }}" >> "${GITHUB_ENV}"
+          else
+            echo "ROHUB_USERNAME=${{ secrets.ROHUB_DEV_USERNAME }}" >> "${GITHUB_ENV}"
+            echo "ROHUB_PASSWORD=${{ secrets.ROHUB_DEV_PASSWORD }}" >> "${GITHUB_ENV}"
+          fi
+          if ! grep -q "ROHUB_USERNAME=." "${GITHUB_ENV}"; then
+            echo "::error::Add the RoHub login as repository secrets (ROHUB_DEV_USERNAME and ROHUB_DEV_PASSWORD for the development RoHub, ROHUB_PROD_* for production)."
+            exit 1
+          fi
+
+      - name: Upload ${{ inputs.display_name }} RO-Crate Zip file onto RoHub
+        shell: bash -l {0}
+        env:
+          SOFTWARE_NAME: ${{ inputs.software }}
+        run: |
+          rohub_args=()
+          if [ "${USE_PRODUCTION_ROHUB}" = "true" ]; then
+            rohub_args=(--use-production-rohub)
+          fi
+
+          upload-semantic-benchmark \
+            --provenance_folderpath "${GITHUB_WORKSPACE}/artifacts/${SOFTWARE_NAME}/${SOFTWARE_NAME}_rocrate.zip" \
+            --benchmark-name "${BENCHMARK_NAME}" \
+            --benchmark-rohub-identifier "${{ inputs.benchmark_rohub_identifier }}" \
+            --username "${ROHUB_USERNAME}" \
+            --password "${ROHUB_PASSWORD}" \
+            --code-repository-url "${CODE_REPOSITORY_URL}" \
+            "${rohub_args[@]}"

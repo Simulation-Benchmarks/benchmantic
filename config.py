@@ -12,7 +12,7 @@ options of workflow.py and describe_benchmark.py; the command line wins.
     software: DuMux
     container: registry.example.org/benchmark:1.0
 
-run-config-template.yaml explains the plain keys; any option also works as a
+examples/run-config-template.yaml explains the plain keys; any option also works as a
 key, by its name. A `repository:` block is for create_benchmark_repo.py and
 ignored here. Two argparse limits: a flag set to true in the file can't be
 turned off on the command line, and a repeatable option given in both places
@@ -134,7 +134,7 @@ def apply_config(config: dict[str, Any], *parsers: argparse.ArgumentParser, sour
     if unknown:
         sys.exit(
             f"Error: {source}: unknown key(s): {', '.join(sorted(unknown))}. The keys are "
-            f"{', '.join(PLAIN_KEYS)} (see run-config-template.yaml); any command-line option also "
+            f"{', '.join(PLAIN_KEYS)} (see examples/run-config-template.yaml); any command-line option also "
             f"works, by its name (python3 describe_benchmark.py --help)."
         )
     for parser in parsers:

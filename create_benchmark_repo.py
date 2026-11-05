@@ -108,6 +108,22 @@ def tables(desc: dict) -> dict[str, str]:
                 METRICS_LIST="\n".join(f"- **`{m}`**" + (f": {d}" if d else "") for m, _, d in desc["metrics"]))
 
 
+def rohub_settings(desc: dict, settings: dict) -> dict[str, str]:
+    """RoHub and notebook placeholders: production or development RoHub, the
+    parameter the notebook plots the metrics against (`plot_parameter`, else the
+    first numeric parameter that differs between configurations) and the metrics."""
+    production = bool(settings.get("rohub_production", False))
+    confs = [values for _, values in desc["configurations"]]
+    numeric = [p for p in desc["parameters"]
+               if all(isinstance(v.get(p), (int, float)) and not isinstance(v.get(p), bool) for v in confs)]
+    varying = [p for p in numeric if len({v.get(p) for v in confs}) > 1]
+    plot = settings.get("plot_parameter") or (varying or numeric or list(desc["parameters"]) or ["configuration"])[0]
+    if plot not in desc["parameters"]:
+        sys.exit(f"Error: plot_parameter {plot!r} is not a parameter of the benchmark: {', '.join(desc['parameters'])}")
+    return dict(ROHUB_PRODUCTION="true" if production else "false", ROHUB_PRODUCTION_PY=str(production),
+                PLOT_PARAMETER=plot, METRICS_PY=repr([m for m, _, _ in desc["metrics"]]))
+
+
 # --- writing the repository ------------------------------------------------------------
 
 def fill(text: str, values: dict) -> str:
@@ -198,6 +214,7 @@ def build(outputs: Path, out: Path, settings: dict, org: str, config_dir: Path) 
         LOCAL_IMAGE=f"local/{name}-{software_dir}:ci", N_CONFIGURATIONS=len(desc["configurations"]),
         UNIT_SYMBOLS=json.dumps({re.split(r"[:/#]", u)[-1]: s for u, s in DEFAULT_UNIT_SYMBOLS.items()}),
         AGENT_NAME=f"{agent['given']} {agent['family']}", AGENT_ORCID=agent["orcid"],
+        ROHUB_IDENTIFIER=str(settings.get("rohub_identifier") or ""), **rohub_settings(desc, settings),
         EXTRA_LICENSES="", **tables(desc))
 
     if out.exists():
