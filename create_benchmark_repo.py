@@ -22,7 +22,8 @@ GitHub CLI (gh) signed in with a token that may create repositories in --org
 and push workflow files (classic token: scopes repo + workflow).
 
 --rohub (with --github) also sets up RoHub: it finds or creates the benchmark's
-research object on the development RoHub (and on production with
+research object on the development RoHub (research area: `rohub_research_area`,
+else the one the LLM chooses from RoHub's list) (and on production with
 `rohub_production: true` or a production login), stores the RoHub logins and
 the research objects' identifiers in the new repository, and starts its RoHub
 Integration CI. The logins come from the environment: ROHUB_DEV_USERNAME,
@@ -343,8 +344,70 @@ def watch(out: Path, full: str, expect: tuple[str, ...] = (), since: str = "",
 
 # --- RoHub ------------------------------------------------------------------------------------
 
+#: research areas for a new research object, in order of preference (a word in the area's name)
+RESEARCH_AREAS = ("fluid", "mechanical engineering", "mechanics", "engineering", "physics")
+
+
+def ai_research_area(areas: list[str], benchmark: dict, provider: str | None = None) -> str | None:
+    """The research area the LLM chooses for the benchmark from RoHub's `areas`;
+    None if no LLM can be asked (no key, no answer from the list)."""
+    if not areas:
+        return None
+    from ai.inference import _query_llm_json_array, choose_provider
+
+    def check(data):
+        if not (isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict)):
+            raise ValueError("Expected a JSON array with exactly one object.")
+        answer = str(data[0].get("research_area", "")).strip()
+        match = next((a for a in areas if a.lower() == answer.lower()), None)
+        if not match:
+            raise ValueError(f"{answer!r} is not one of the allowed research areas; copy one exactly.")
+        data[0]["research_area"] = match
+        return data
+
+    system = ("You assign scientific research objects to a research area of RoHub. Answer with a JSON array "
+              'holding exactly one object: {"research_area": "<one area, copied exactly from the list>", '
+              '"reason": "<one short sentence>"}. Choose the most specific area that fits the subject.')
+    prompt = "\n".join([
+        f"Benchmark: {benchmark['label']}", f"Simulation software: {benchmark['software']}",
+        f"Description: {benchmark['description'][:3000]}",
+        f"Parameters: {', '.join(benchmark['parameters'])}",
+        f"Metrics: {', '.join(m for m, _, _ in benchmark['metrics'])}", "",
+        "Allowed research areas (choose exactly one):", *(f"- {a}" for a in sorted(areas))])
+    try:
+        answer = _query_llm_json_array(
+            provider=choose_provider(provider), model=None, system_prompt=system, prompt=prompt,
+            item_count=1, item_label="research area", validator=check, retries=3, retry_delay=2.0,
+            verbose=False)[0]
+    except (Exception, SystemExit) as e:  # no key, no network, no valid answer: fall back
+        print(f"  ! the LLM could not choose a research area ({str(e).splitlines()[0][:200]}); using the default rule")
+        return None
+    print(f"  the LLM chose the research area {answer['research_area']!r}: {answer.get('reason', '')}")
+    return answer["research_area"]
+
+
+def research_area(areas: list[str], wanted: str | None = None, benchmark: dict | None = None,
+                  provider: str | None = None) -> str:
+    """`wanted` (any capitalisation; must be one of RoHub's `areas`), else the one
+    the LLM chooses for `benchmark`, else the first area matching RESEARCH_AREAS,
+    else the first area."""
+    if wanted:
+        match = next((a for a in areas if a.lower() == wanted.lower()), None)
+        if areas and not match:
+            sys.exit(f"Error: rohub_research_area {wanted!r} is not a RoHub research area; "
+                     f"these are: {', '.join(sorted(areas))}")
+        return match or wanted
+    chosen = benchmark and ai_research_area(areas, benchmark, provider)
+    if chosen:
+        return chosen
+    for word in RESEARCH_AREAS:
+        match = next((a for a in sorted(areas) if word in a.lower()), None)
+        if match:
+            return match
+    return areas[0] if areas else "Engineering"
+
 def research_object(name: str, description: str, url: str, jsonld: Path, production: bool,
-                    login: tuple[str, str], area: str | None = None) -> str:
+                    login: tuple[str, str], area: str | None = None, llm_provider: str | None = None) -> str:
     """The UUID of the research object titled `name` of this RoHub login; created,
     with the benchmark description and the repository's URL, if there is none."""
     try:
@@ -358,8 +421,9 @@ def research_object(name: str, description: str, url: str, jsonld: Path, product
         mine = rohub.list_my_ros()
         if not mine.empty and (mine["title"] == name).any():
             return str(mine[mine["title"] == name].iloc[0]["identifier"])
-        areas = rohub.list_valid_research_areas() or []
-        area = area or next((a for a in areas if "engineering" in a.lower()), areas[0] if areas else "Engineering")
+        area = research_area(rohub.list_valid_research_areas() or [], area, read_description(jsonld),
+                             os.environ.get("LLM_PROVIDER") or llm_provider)
+        print(f"  creating the research object on the {where} RoHub (research area: {area})")
         ro = rohub.ros_create(title=name, research_areas=[area], description=description[:2000])
         ro.add_annotations(body_specification_json=[{"property": "https://schema.org/codeRepository", "value": url}])
         types = rohub.list_valid_resource_types() or []
@@ -374,7 +438,7 @@ def research_object(name: str, description: str, url: str, jsonld: Path, product
         sys.exit(f"Error: {where} RoHub: {e}")
 
 
-def setup_rohub(full: str, url: str, out: Path, settings: dict) -> list[str]:
+def setup_rohub(full: str, url: str, out: Path, settings: dict, llm_provider: str | None = None) -> list[str]:
     """Find or create the research objects, store the logins and identifiers in
     `full`; returns the RoHub instances set up."""
     production = bool(settings.get("rohub_production", False))
@@ -389,7 +453,7 @@ def setup_rohub(full: str, url: str, out: Path, settings: dict) -> list[str]:
         uuid = (str(settings.get(f"rohub_{kind.lower()}_identifier") or "")
                 or (known.stdout.strip() if known.returncode == 0 else "")
                 or research_object(settings["name"], settings.get("summary") or settings["name"], url, jsonld,
-                                   kind == "PROD", login, settings.get("rohub_research_area")))
+                                   kind == "PROD", login, settings.get("rohub_research_area"), llm_provider))
         for secret, value in zip(("USERNAME", "PASSWORD"), login):
             run(["gh", "secret", "set", f"ROHUB_{kind}_{secret}", "--repo", full], stdin=value)
         run(["gh", "variable", "set", variable, "--repo", full, "--body", uuid])
@@ -449,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     summary(f"### Benchmark repository: [{full}]({url})", "")
     expect, since = (), ""
     if args.rohub:
-        setup_rohub(full, url, out, settings)
+        setup_rohub(full, url, out, settings, config.get("llm_provider"))
         since, expect = start_rohub_run(full), ("RoHub Integration CI",)
     if args.watch:
         print(f"  Waiting for its GitHub Actions: {url}/actions")

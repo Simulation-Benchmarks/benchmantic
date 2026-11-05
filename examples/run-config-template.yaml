@@ -49,6 +49,6 @@ container: registry.example.org/my-benchmark:1.0   # the container image it runs
 #   authors: ["Given Family; 0000-0000-0000-0000; University"]
 #   rohub_dev_identifier: ""           # an existing research object on the development RoHub (default: --rohub finds or creates it)
 #   rohub_prod_identifier: ""          # the same on production
-#   rohub_research_area: Engineering   # for a research object --rohub creates
+#   rohub_research_area: Fluid dynamics # for a research object --rohub creates (default: the LLM chooses from RoHub's list)
 #   rohub_production: false            # manual runs: development RoHub (true: rohub.org); weekly: development
 #   plot_parameter: cells_radial       # the notebook's x-axis (default: the first that varies)

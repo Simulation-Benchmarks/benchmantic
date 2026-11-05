@@ -43,4 +43,5 @@ repository:
   keywords: [benchmark, computational fluid dynamics, Taylor-Couette flow, rotating cylinders, NFDI4ING, model validation, FAIR4RS, REUSE]
   # RoHub: --rohub finds or creates the benchmark's research object; to use a
   # particular one, give its UUID as rohub_dev_identifier (rohub_prod_identifier)
+  # rohub_research_area: Fluid dynamics  # exactly as RoHub names it (default: the LLM chooses from RoHub's list)
   rohub_production: false              # manual runs: the development RoHub (true: rohub.org); weekly runs: development

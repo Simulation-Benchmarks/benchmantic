@@ -216,7 +216,10 @@ a manual run to development by default (`rohub_production: true`: production).
 (`ROHUB_DEV_USERNAME`, `ROHUB_DEV_PASSWORD`; for production also
 `ROHUB_PROD_USERNAME`, `ROHUB_PROD_PASSWORD`) it finds the benchmark's research
 object -- the one of that login titled like the repository -- or creates it with
-the benchmark description, stores the login and the object's identifier in the new
+the benchmark description (research area: `rohub_research_area:`, else the one the
+LLM chooses from RoHub's list for the benchmark, else the first of RoHub's areas
+with "fluid", then "mechanical engineering", "mechanics", "engineering", "physics"
+in its name), stores the login and the object's identifier in the new
 repository (secrets `ROHUB_DEV_*`, variable `ROHUB_DEV_BENCHMARK_IDENTIFIER`, and the
 same with `PROD`), and starts its RoHub Integration CI. To use an existing research
 object instead, give its UUID as `rohub_dev_identifier:` (`rohub_prod_identifier:`)
