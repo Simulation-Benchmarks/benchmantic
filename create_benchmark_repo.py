@@ -407,9 +407,12 @@ def research_area(areas: list[str], wanted: str | None = None, benchmark: dict |
     return areas[0] if areas else "Engineering"
 
 def research_object(name: str, description: str, url: str, jsonld: Path, production: bool,
-                    login: tuple[str, str], area: str | None = None, llm_provider: str | None = None) -> str:
-    """The UUID of the research object titled `name` of this RoHub login; created,
-    with the benchmark description and the repository's URL, if there is none."""
+                    login: tuple[str, str], area: str | None = None, llm_provider: str | None = None,
+                    known: str = "") -> str:
+    """The UUID of the benchmark's research object on this RoHub: `known`, else the
+    one of this login titled `name`, else a new one with the benchmark description
+    and the repository's URL. Its research area is set to `area`, else the one the
+    LLM chooses (see research_area()) -- also on an existing research object."""
     try:
         import rohub
         from semantic_benchmark.rohub import login_to_rohub
@@ -418,11 +421,23 @@ def research_object(name: str, description: str, url: str, jsonld: Path, product
     where = "production" if production else "development"
     try:
         login_to_rohub(*login, use_production_rohub=production)
-        mine = rohub.list_my_ros()
-        if not mine.empty and (mine["title"] == name).any():
-            return str(mine[mine["title"] == name].iloc[0]["identifier"])
+        if not known:
+            mine = rohub.list_my_ros()
+            if not mine.empty and (mine["title"] == name).any():
+                known = str(mine[mine["title"] == name].iloc[0]["identifier"])
         area = research_area(rohub.list_valid_research_areas() or [], area, read_description(jsonld),
                              os.environ.get("LLM_PROVIDER") or llm_provider)
+        if known:
+            ro = rohub.ros_load(known)
+            current = [a.get("name", a) if isinstance(a, dict) else a for a in (ro.research_areas or [])]
+            if current != [area]:
+                try:
+                    ro.research_areas = [area]
+                    ro.update()
+                    print(f"  research area of {known} on the {where} RoHub: {', '.join(map(str, current)) or '-'} -> {area}")
+                except (Exception, SystemExit) as e:  # not worth failing the run for
+                    print(f"  ! could not change the research area of {known} to {area}: {e}")
+            return known
         print(f"  creating the research object on the {where} RoHub (research area: {area})")
         ro = rohub.ros_create(title=name, research_areas=[area], description=description[:2000])
         ro.add_annotations(body_specification_json=[{"property": "https://schema.org/codeRepository", "value": url}])
@@ -449,11 +464,11 @@ def setup_rohub(full: str, url: str, out: Path, settings: dict, llm_provider: st
         if not all(login):
             sys.exit(f"Error: --rohub needs the RoHub login in ROHUB_{kind}_USERNAME and ROHUB_{kind}_PASSWORD.")
         variable = f"ROHUB_{kind}_BENCHMARK_IDENTIFIER"
-        known = run(["gh", "variable", "get", variable, "--repo", full], check=False)
-        uuid = (str(settings.get(f"rohub_{kind.lower()}_identifier") or "")
-                or (known.stdout.strip() if known.returncode == 0 else "")
-                or research_object(settings["name"], settings.get("summary") or settings["name"], url, jsonld,
-                                   kind == "PROD", login, settings.get("rohub_research_area"), llm_provider))
+        stored = run(["gh", "variable", "get", variable, "--repo", full], check=False)
+        known = (str(settings.get(f"rohub_{kind.lower()}_identifier") or "")
+                 or (stored.stdout.strip() if stored.returncode == 0 else ""))
+        uuid = research_object(settings["name"], settings.get("summary") or settings["name"], url, jsonld,
+                               kind == "PROD", login, settings.get("rohub_research_area"), llm_provider, known)
         for secret, value in zip(("USERNAME", "PASSWORD"), login):
             run(["gh", "secret", "set", f"ROHUB_{kind}_{secret}", "--repo", full], stdin=value)
         run(["gh", "variable", "set", variable, "--repo", full, "--body", uuid])
