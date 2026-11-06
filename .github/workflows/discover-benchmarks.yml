@@ -22,6 +22,10 @@ on:
       owner:
         description: GitHub account of the benchmark repositories (empty = the owner of this repository)
         default: ""
+      ask_llm:
+        description: Ask the LLM again for every parameter and metric (else only for those without stored answers)
+        type: boolean
+        default: false
       rohub:
         description: Set up RoHub for each repository and run its RoHub Integration CI
         type: boolean
@@ -71,6 +75,6 @@ jobs:
     with:
       config: ${{ matrix.benchmark.config }}
       owner: ${{ inputs.owner }}
-      ask_llm: false
+      ask_llm: ${{ inputs.ask_llm == true }}
       rohub: ${{ inputs.rohub != false }}
     secrets: inherit
