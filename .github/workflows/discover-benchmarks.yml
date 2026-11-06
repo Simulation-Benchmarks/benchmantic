@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: 2026 Simulation-Benchmarks
+#
+# SPDX-License-Identifier: MIT
+
+# Finds the benchmarks of the DuMux benchmark list
+# (https://dumux.org/docs/doxygen/master/benchmarks.html) that have no repository
+# in the GitHub account yet, and runs "Create benchmark repository" for each.
+# An entry needs a run config, examples/<repository-name>/benchmantic.yaml;
+# entries without one are listed in the summary and skipped.
+#
+# FOR NOW it always takes "Taylor-Couette Flow" from the list, whether or not its
+# repository exists (it is then updated). For the real discovery, uncomment the
+# schedule and swap the two `python discover_benchmarks.py` lines below.
+#
+# Secrets: those of "Create benchmark repository" (BENCHMARK_REPO_TOKEN,
+# LLM_API_KEY, ROHUB_DEV_USERNAME, ROHUB_DEV_PASSWORD).
+name: Discover DuMux benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: GitHub account of the benchmark repositories (empty = the owner of this repository)
+        default: ""
+      rohub:
+        description: Set up RoHub for each repository and run its RoHub Integration CI
+        type: boolean
+        default: true
+  # schedule:
+  #   - cron: '0 3 * * 1'   # every Monday: create repositories for new entries
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.find.outputs.entries }}
+      count: ${{ steps.find.outputs.count }}
+    env:
+      OWNER: ${{ inputs.owner || github.repository_owner }}
+      GH_TOKEN: ${{ secrets.BENCHMARK_REPO_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compare the DuMux list with the repositories of the account
+        id: find
+        run: |
+          # FOR NOW: always Taylor-Couette Flow, created or updated
+          python discover_benchmarks.py --org "$OWNER" --only "Taylor-Couette Flow" --include-existing > found.json
+          # the real discovery: every entry without a repository in $OWNER
+          # python discover_benchmarks.py --org "$OWNER" > found.json
+          cat found.json
+          echo "entries=$(jq -c '[.entries[] | {title, name, config}]' found.json)" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq '.entries | length' found.json)" >> "$GITHUB_OUTPUT"
+
+  create:
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # one at a time: the LLM's rate limits, and one DuMux build after another
+      matrix:
+        benchmark: ${{ fromJSON(needs.discover.outputs.entries) }}
+    name: ${{ matrix.benchmark.title }}
+    uses: ./.github/workflows/create-benchmark-repo.yml
+    with:
+      config: ${{ matrix.benchmark.config }}
+      owner: ${{ inputs.owner }}
+      ask_llm: false
+      rohub: ${{ inputs.rohub != false }}
+    secrets: inherit

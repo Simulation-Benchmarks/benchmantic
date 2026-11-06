@@ -5,6 +5,7 @@
 # Describe a benchmark with benchmantic, create its benchmark repository in a
 # GitHub account, and wait for that repository's own GitHub Actions.
 # Start it from the Actions tab: "Create benchmark repository" -> "Run workflow".
+# "Discover DuMux benchmarks" (discover-benchmarks.yml) runs it for each new entry of the DuMux list.
 #
 # Repository secrets (Settings -> Secrets and variables -> Actions):
 #   BENCHMARK_REPO_TOKEN  personal access token of the target account (classic: scopes
@@ -32,6 +33,20 @@ on:
         default: false
       rohub:
         description: Set up RoHub (research object, logins) and run the new repository's RoHub Integration CI
+        type: boolean
+        default: true
+  workflow_call:   # by "Discover DuMux benchmarks", once per benchmark
+    inputs:
+      config:
+        type: string
+        required: true
+      owner:
+        type: string
+        default: ""
+      ask_llm:
+        type: boolean
+        default: false
+      rohub:
         type: boolean
         default: true
 
@@ -70,6 +85,8 @@ jobs:
             echo "::error::Add the repository secrets ROHUB_DEV_USERNAME and ROHUB_DEV_PASSWORD (your development RoHub login), or untick rohub."; exit 1
           fi
           gh auth setup-git
+          # one artifact per benchmark (a discovery run creates several)
+          echo "ARTIFACT=benchmark-repository-$(basename "$(dirname "$CONFIG")")" >> "$GITHUB_ENV"
           git config --global user.name "$ACTOR"
           git config --global user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
 
@@ -90,7 +107,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-repository
+          name: ${{ env.ARTIFACT || 'benchmark-repository' }}
           path: |
             outputs/
             !outputs/repositories/*/.git/

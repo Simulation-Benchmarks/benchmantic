@@ -235,6 +235,7 @@ unless they pass.
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | every push and pull request | tests and REUSE lint; the example described and turned into a repository |
 | [`create-benchmark-repo.yml`](.github/workflows/create-benchmark-repo.yml) | Actions tab -> *Run workflow* | describes a benchmark (input: its run config), creates its repository in a GitHub account and waits for that repository's Actions |
+| [`discover-benchmarks.yml`](.github/workflows/discover-benchmarks.yml) | Actions tab -> *Run workflow* (a weekly schedule is prepared, commented out) | compares the [DuMux benchmark list](https://dumux.org/docs/doxygen/master/benchmarks.html) with the repositories of the account and runs *Create benchmark repository* for each new entry that has a run config `examples/<name>/benchmantic.yaml`; **for now** it always takes *Taylor-Couette Flow* |
 
 *Create benchmark repository* needs two repository secrets: `BENCHMARK_REPO_TOKEN`,
 a personal access token of the target account (classic: scopes `repo` and
@@ -257,6 +258,7 @@ describe_benchmark.py    describe: the description, dataset, mapping and Snakefi
 show_description.py      a description as Markdown tables (review.md)
 verify_description.py    checks a description against semantic-benchmark
 create_benchmark_repo.py a benchmark repository from the outputs
+discover_benchmarks.py   entries of the DuMux benchmark list without a repository yet
 config.py                run configs
 metadata/                reading the implementation, building the JSON-LD
 ai/                      the LLM: prompts, requests, checks, review, stored answers
