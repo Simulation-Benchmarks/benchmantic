@@ -41,7 +41,9 @@ env:
 jobs:
   run-examples:
     name: @@SOFTWARE_NAME@@
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04: the Apptainer package needs libfuse3-3, which Ubuntu 26.04 (ubuntu-latest
+    # since October 2026) no longer has
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repo content
