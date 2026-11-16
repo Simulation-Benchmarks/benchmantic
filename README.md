@@ -235,7 +235,7 @@ unless they pass.
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | every push and pull request | tests and REUSE lint; the example described and turned into a repository |
 | [`create-benchmark-repo.yml`](.github/workflows/create-benchmark-repo.yml) | Actions tab -> *Run workflow* | describes a benchmark (input: its run config), creates its repository in a GitHub account and waits for that repository's Actions |
-| [`discover-benchmarks.yml`](.github/workflows/discover-benchmarks.yml) | Actions tab -> *Run workflow* (a weekly schedule is prepared, commented out) | compares the [DuMux benchmark list](https://dumux.org/docs/doxygen/master/benchmarks.html) with the repositories of the account and runs *Create benchmark repository* for each new entry that has a run config `examples/<name>/benchmantic.yaml`; **for now** it always takes *Taylor-Couette Flow* |
+| [`discover-benchmarks.yml`](.github/workflows/discover-benchmarks.yml) | Actions tab -> *Run workflow* (a weekly schedule is prepared, commented out) | compares the [DuMux benchmark list](https://dumux.org/docs/doxygen/master/benchmarks.html) with the repositories of the account and lists the entries without a repository and runs *Create benchmark repository* for each that has a run config `examples/<name>/benchmantic.yaml`; **for now** it lists them all but creates only *Taylor-Couette Flow* |
 
 *Create benchmark repository* needs two repository secrets: `BENCHMARK_REPO_TOKEN`,
 a personal access token of the target account (classic: scopes `repo` and

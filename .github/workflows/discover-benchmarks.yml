@@ -8,9 +8,10 @@
 # An entry needs a run config, examples/<repository-name>/benchmantic.yaml;
 # entries without one are listed in the summary and skipped.
 #
-# FOR NOW it always takes "Taylor-Couette Flow" from the list, whether or not its
-# repository exists (it is then updated). For the real discovery, uncomment the
-# schedule and swap the two `python discover_benchmarks.py` lines below.
+# FOR NOW it lists every new entry (in the run's summary) but creates only
+# "Taylor-Couette Flow" (the rotating cylinders), whether or not its repository
+# exists (it is then updated). To create every new entry, uncomment the schedule
+# and swap the two `python discover_benchmarks.py` lines below.
 #
 # Secrets: those of "Create benchmark repository" (BENCHMARK_REPO_TOKEN,
 # LLM_API_KEY, ROHUB_DEV_USERNAME, ROHUB_DEV_PASSWORD).
@@ -54,9 +55,9 @@ jobs:
       - name: Compare the DuMux list with the repositories of the account
         id: find
         run: |
-          # FOR NOW: always Taylor-Couette Flow, created or updated
-          python discover_benchmarks.py --org "$OWNER" --only "Taylor-Couette Flow" --include-existing > found.json
-          # the real discovery: every entry without a repository in $OWNER
+          # FOR NOW: list every new entry, create (or update) only Taylor-Couette Flow
+          python discover_benchmarks.py --org "$OWNER" --create "Taylor-Couette Flow" > found.json
+          # the real discovery: create every new entry that has a run config
           # python discover_benchmarks.py --org "$OWNER" > found.json
           cat found.json
           echo "entries=$(jq -c '[.entries[] | {title, name, config}]' found.json)" >> "$GITHUB_OUTPUT"

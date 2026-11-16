@@ -7,18 +7,19 @@
 discover_benchmarks.py
 
 Compares the entries of the DuMux benchmark list with the repositories of a
-GitHub account and prints, as JSON, the entries that have no repository yet --
+GitHub account, lists the entries that have no repository yet, and prints, as
+JSON, those to create -- every new entry, or only those given with --create --
 for the GitHub Actions workflow discover-benchmarks.yml, which creates one
 repository per entry.
 
     python3 discover_benchmarks.py --org Sarbani-Roy
-    python3 discover_benchmarks.py --org Sarbani-Roy --only "Taylor-Couette Flow" --include-existing
+    python3 discover_benchmarks.py --org Sarbani-Roy --create "Taylor-Couette Flow"
 
 An entry's repository is named after its title ("Taylor-Couette Flow" ->
 taylor-couette-flow). An entry can only be turned into a repository once it has
 a run config, examples/<name>/benchmantic.yaml (the implementation must write
-the metrics benchmantic reads; that is not automated); entries without one are
-listed under "needs_config" and left out of "entries". Needs the GitHub CLI
+the metrics benchmantic reads; that is not automated); new entries without one
+are listed but not created. Needs the GitHub CLI
 (gh) unless --repos is given.
 """
 
@@ -121,48 +122,49 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--url", default=DUMUX_BENCHMARKS, help="The benchmark list (default: %(default)s).")
     ap.add_argument("--html", type=Path, help="Read the list from this file instead of --url.")
     ap.add_argument("--repos", help="Comma-separated repository names instead of asking GitHub (for testing).")
-    ap.add_argument("--only", action="append", default=[],
-                    help="Only the entry with this title (repeatable); an unknown title is an error.")
-    ap.add_argument("--include-existing", action="store_true",
-                    help="Also entries that already have a repository (they get updated).")
+    ap.add_argument("--create", action="append", default=[], metavar="TITLE",
+                    help="Create (or update) only the entry with this title (repeatable), whether or not it has a "
+                         "repository; the others are only listed. Default: every new entry with a run config.")
     ap.add_argument("--examples", type=Path, default=ROOT / "examples", help="Where run configs are (default: examples/).")
     args = ap.parse_args(argv)
 
     entries = parse_entries(args.html.read_text(encoding="utf-8") if args.html else fetch(args.url), args.url)
     if not entries:
         sys.exit(f"Error: found no benchmarks in {args.url} -- has the page changed?")
-    if args.only:
-        wanted = {slug(t) for t in args.only}
-        missing = wanted - {e["name"] for e in entries}
-        if missing:
-            sys.exit(f"Error: not in the list: {', '.join(sorted(missing))}; it has: "
-                     f"{', '.join(e['title'] for e in entries)}")
-        entries = [e for e in entries if e["name"] in wanted]
+    chosen = {slug(t) for t in args.create}
+    unknown = chosen - {e["name"] for e in entries}
+    if unknown:
+        sys.exit(f"Error: not in the list: {', '.join(sorted(unknown))}; it has: "
+                 f"{', '.join(e['title'] for e in entries)}")
     existing = {r.strip().lower() for r in args.repos.split(",")} if args.repos is not None else repositories(args.org)
 
-    todo, has_repo, needs_config = [], [], []
     for e in entries:
         e["exists"] = e["name"] in existing
         config = args.examples / e["name"] / "benchmantic.yaml"
         e["config"] = str(config.relative_to(ROOT)) if config.is_relative_to(ROOT) else str(config)
-        if e["exists"] and not args.include_existing:
-            has_repo.append(e)
-        elif not config.is_file():
-            needs_config.append(e)
-        else:
-            todo.append(e)
-
-    summary([f"### DuMux benchmarks: {len(entries)} considered, {len(todo)} to create or update", "",
-             "| Benchmark | Repository | |", "|---|---|---|"]
-            + [f"| {e['title']} | `{args.org}/{e['name']}` | {'update' if e['exists'] else 'create'} |" for e in todo]
-            + [f"| {e['title']} | `{args.org}/{e['name']}` | exists |" for e in has_repo]
-            + [f"| {e['title']} | `{e['name']}` | needs `{e['config']}` |" for e in needs_config] + [""])
+        e["has_config"] = config.is_file()
+    new = [e for e in entries if not e["exists"]]
+    todo = [e for e in entries if e["name"] in chosen] if chosen else [e for e in new if e["has_config"]]
     for e in todo:
-        print(f"  {'update' if e['exists'] else 'create'}: {e['title']} -> {args.org}/{e['name']}", file=sys.stderr)
-    for e in needs_config:
-        print(f"  skip (no run config {e['config']}): {e['title']}", file=sys.stderr)
-    print(json.dumps(dict(entries=todo, existing=[e["name"] for e in has_repo],
-                          needs_config=[e["name"] for e in needs_config])))
+        if not e["has_config"]:
+            sys.exit(f"Error: {e['title']} has no run config {e['config']}")
+
+    def state(e):
+        if e in todo:
+            return "**update**" if e["exists"] else "**create**"
+        return "listed only" if e["has_config"] or chosen else f"needs `{e['config']}`"
+    summary([f"### DuMux benchmarks: {len(entries)} in the list, {len(new)} without a repository in "
+             f"`{args.org}`, {len(todo)} to create or update", "",
+             "| Benchmark | Section | Repository | |", "|---|---|---|---|"]
+            + [f"| [{e['title']}]({e['link']}) | {e['section']} | `{e['name']}` | {state(e)} |"
+               for e in new + [e for e in todo if e["exists"]]] + [""])
+    print(f"{len(new)} of {len(entries)} DuMux benchmarks have no repository in {args.org}:", file=sys.stderr)
+    for e in new:
+        print(f"  {e['title']} -> {e['name']}", file=sys.stderr)
+    for e in todo:
+        print(f"{'update' if e['exists'] else 'create'}: {e['title']} -> {args.org}/{e['name']}", file=sys.stderr)
+    print(json.dumps(dict(entries=todo, new=[e["name"] for e in new],
+                          existing=[e["name"] for e in entries if e["exists"]])))
     return 0
 
 
